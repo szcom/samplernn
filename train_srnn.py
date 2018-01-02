@@ -26,15 +26,13 @@ import argparse
 import time
 
 #theano.config.compute_test_value = 'warn'
-sz = 'fruit'
-sz = 'fruit1'
 SLOW_DIM=1024
 DIM=1024
 SLOW_FS=8
 parser = argparse.ArgumentParser(
     description='Train or sample the samplernn.')
-parser.add_argument('--exp', help='Experiment size name (fruit|fruit1|1000|all)',
-                    type=str, required=False, default='fruit')
+parser.add_argument('--exp', help='Experiment size name (tiny|all)',
+                    type=str, required=False, default='tiny')
 parser.add_argument('--sample', help='path to weights file to load before sampling',
                     type=str, required=False, default=None)
 parser.add_argument('--load', help='path to weights file to resume training',
@@ -48,48 +46,29 @@ parser.add_argument('--validstop', help='max index for valid sequences ', type=i
 parser.add_argument('--svepoch', help='save weights every epoch', type=int, required=False, default=-1)
 parser.add_argument('--cutlen', help='timesteps per subsequence', type=int, required=False, default=256)
 parser.add_argument('--debug', help='dont sample softmax', type=int, required=False, default=0)
-parser.add_argument('--samplerate', help='number of epochs to run ', type=int, required=False, default=8000)
+parser.add_argument('--samplerate', help='number of epochs to run ', type=int, required=False, default=16000)
 
 args = parser.parse_args()
-sz = args.exp
 SLOW_DIM=args.slowdim
 DIM=args.dim
 cut_len=256
 valid_stop_index= -1
 train_stop_index=0.8
 
-if sz == 'fruit':
-   n_epochs=100
-   train_stop_index=80
-   minibatch_size = 5
-   valid_stop_index= -1
+if args.exp == 'tiny':
+   n_epochs         =10
+   train_stop_index = 4
+   minibatch_size   = 2
+   valid_stop_index = 6
 
-if sz == 'fruit1':
-   sz = 'fruit'
-   n_epochs=10
-   train_stop_index=80
-   minibatch_size = 5
-   valid_stop_index= -1
-
-if sz == '1000':
-   n_epochs=10
-   valid_stop_index= -1
-   minibatch_size = 100
-   train_stop_index=800
-
-if sz == 'all':
-   n_epochs=50
-   minibatch_size = 100
+if args.exp == 'all':
+   n_epochs         = 3
+   minibatch_size   = 100
    valid_stop_index = 9000
    train_stop_index = 8000
 
-if sz == 'all_8':
-   n_epochs=50
-   minibatch_size = 100
-   valid_stop_index = 9000
-   train_stop_index = 8000
-   
 cut_len = args.cutlen
+
 if args.nepochs:
     n_epochs = args.nepochs
 
@@ -104,15 +83,15 @@ if args.validstop:
     
 frame_size = 1
 bliz_train = Blizzard_dataset(minibatch_size=minibatch_size,
-                              wav_folder_path='./blizzard/wavn_{}'.format(sz),
-                              prompt_path='./blizzard/prompts_{}.txt'.format(sz),
+                              wav_folder_path='./blizzard/{}_parts/'.format(args.exp),
+                              prompt_path='./blizzard/{}_parts/prompts.txt'.format(args.exp),
                               preproc_fn=wav_to_qbins_frames,
                               frame_size=frame_size,
                               fraction_range=[0, train_stop_index],
                               thread_cnt=1)
 bliz_valid = Blizzard_dataset(minibatch_size=minibatch_size,
-                              wav_folder_path='./blizzard/wavn_{}'.format(sz),
-                              prompt_path='./blizzard/prompts_{}.txt'.format(sz),
+                              wav_folder_path='./blizzard/{}_parts/'.format(args.exp),
+                              prompt_path='./blizzard/{}_parts/prompts.txt'.format(args.exp),
                               preproc_fn=wav_to_qbins_frames,
                               frame_size=frame_size,
                               fraction_range=[train_stop_index, valid_stop_index],
@@ -148,7 +127,7 @@ if args.sample:
         
     w = pred_srnn.sample(4 * args.samplerate, random_state, args.debug)
     fs = args.samplerate
-    wavfile.write("pred.wav", fs, soundsc(w))
+    wavfile.write("generated.wav", fs, soundsc(w))
     exit(-1)
 
 srnn = SRNN(batch_size=minibatch_size,
@@ -187,9 +166,7 @@ for epoch in range(n_epochs):
         while True:
             total_iterations += 1
             x_part, x_mask_part, c_mb, c_mb_mask, reset = next(train_itr)
-            #import ipdb; ipdb.set_trace()  # XXX BREAKPOINT
-            #raise ValueError()
-            srnn.set_h0_mask(reset)
+            srnn.set_h0_selector(reset)
             l = srnn.train_on_batch(x_part, x_mask_part)
             if reset:
                 progbar.add(x_part.shape[0], values=[("train loss", l)])
@@ -212,7 +189,7 @@ for epoch in range(n_epochs):
         valid_itr = iter(Blizzard_dataset_adapter(bliz_valid, cut_len=cut_len, overlap=SLOW_FS))
         while True:
             x_part, x_mask_part, c_mb, c_mb_mask, reset = next(valid_itr)
-            srnn.set_h0_mask(reset)
+            srnn.set_h0_selector(reset)
             l = srnn.test_on_batch(x_part, x_mask_part)
             epoch_valid_loss.append(l)
             # print("Validation cost:", l * np.log2(np.e), "This lh0.mean()", K.get_value(srnn.slow_lstm_h).mean())
@@ -228,12 +205,9 @@ for epoch in range(n_epochs):
     t2 = time.time()
     print("Epoch took %s seconds" %(t2-t1))
     if args.svepoch > 0 and (epoch % args.svepoch) == 0:
-        srnn.save_weights('{}_srnn_sz{}_e{}_{}.h5'.format(sz, DIM, epoch, K.backend()))
+        srnn.save_weights('{}_srnn_sz{}_e{}_{}.h5'.format(args.exp, DIM, epoch, K.backend()))
         
     
-# copy weights over to single-batch model
-#for lbatch, lstep in zip(srnn.model().layers, pred_srnn.model().layers):
-#    lstep.set_weights(lbatch.get_weights())
     
 
 plt.figure()
@@ -242,7 +216,7 @@ plt.plot(range(len(history_train_loss)), history_train_loss)
 plt.plot(range(len(history_valid_loss)), history_valid_loss)
 plt.savefig('costs.png')
 
-srnn.save_weights('{}_srnn_sz{}_e{}.h5'.format(sz, DIM, epoch))
+srnn.save_weights('{}_srnn_sz{}_e{}.h5'.format(args.exp, DIM, epoch))
 '''
 THEANO_FLAGS='device=cpu' KERAS_BACKEND=tensorflow python train_srnn.py --exp=fruit --nepochs=20 --slowdim=5  --dim=5
 

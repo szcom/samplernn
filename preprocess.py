@@ -3,7 +3,7 @@ import subprocess
 import glob
 
 RAW_DATA_DIR=str(sys.argv[1])
-OUTPUT_DIR=os.path.join(RAW_DATA_DIR, "parts")
+OUTPUT_DIR="{}_parts".format(RAW_DATA_DIR)
 os.makedirs(OUTPUT_DIR)
 print RAW_DATA_DIR
 print OUTPUT_DIR

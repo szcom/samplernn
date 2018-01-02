@@ -1,22 +1,15 @@
 import numpy as np
-import math
 import keras.optimizers
 import keras.regularizers
 from keras import layers
-from keras.layers import merge
 from keras.layers import Input, Dense, TimeDistributed
-from keras.layers import Lambda, Layer, LSTM, GRU, SimpleRNN, Reshape, Activation
-from keras.models import Model, Sequential
+from keras.layers import Lambda, GRU, Reshape
+from keras.models import Model
 from keras import backend as K
-from keras import objectives, activations
 
 from keras.engine import InputSpec
 
-from numpy.random import choice
-from neib import extract_image_patches
 from sframe import SFrame
-import sframe
-import tensorflow as tf
 
 SLOW_DIM   = 10 # 1st slow tier dim (top level tier with the biggest frame size)
 DIM    = 10 # 2&3 tier dim with smaller frame size
@@ -50,7 +43,7 @@ def weight_norm_regularizer(layer, weight):
 
 class GruLearnedH0(GRU):
     def __init__(self, *args, **kwargs):
-        self.initial_state_mask = kwargs.pop('initial_state_mask')
+        self.state_selector = kwargs.pop('state_selector')
         if 'weight_norm' in kwargs:
             self.weight_norm = kwargs.pop('weight_norm')
         else:
@@ -123,7 +116,7 @@ class GruLearnedH0(GRU):
         if initial_state is None:
             raise ValueError("Must have initial state to learn")
 
-        initial_state = [K.switch(self.initial_state_mask, init, state) for state, init in zip(self.states, initial_state)]
+        initial_state = [K.switch(self.state_selector, init, state) for state, init in zip(self.states, initial_state)]
 
         if isinstance(mask, list):
             mask = mask[0]
@@ -173,7 +166,7 @@ class GruLearnedH0(GRU):
             return last_output
 
 
-class DenseHe(Dense):
+class DenseWithWeightNorm(Dense):
     def __init__(self, dim, **kw):
         kernel_initializer='he_uniform'
         if 'kernel_initializer' in kw:
@@ -184,11 +177,11 @@ class DenseHe(Dense):
         else:
             self.weight_norm = True
 
-        super(DenseHe, self).__init__(dim,
+        super(DenseWithWeightNorm, self).__init__(dim,
                                       kernel_initializer=kernel_initializer,
                                       **kw)
     def build(self, input_shape):
-        super(DenseHe, self).build(input_shape)
+        super(DenseWithWeightNorm, self).build(input_shape)
         if self.weight_norm:
             self.kernel = weight_norm_regularizer(self, self.kernel)
 
@@ -223,7 +216,6 @@ class SRNN(object):
                  q_levels=Q_LEVELS,
                  mlp_activation='relu'):
         self.weight_norm = True
-        self.learn_h0 = True
         self.stateful = True
         self.slow_fs = slow_fs
         self.mid_fs = mid_fs
@@ -234,107 +226,86 @@ class SRNN(object):
         slow_seq_len = max(1, seq_len // slow_fs)
         mid_seq_len = max(1, seq_len  // mid_fs)
         prev_sample_seq_len = seq_len + 1
+        
+        ################################################################################
+        ################## Model to train
+        ################################################################################
+        
         self.slow_tier_model_input = Input(batch_shape=(batch_size, slow_seq_len * slow_fs, 1))
-        self.slow_tier_model = Lambda(lambda x: scale_samples_for_rnn(x, q_levels=q_levels), name='scaleslow_2')(self.slow_tier_model_input)
-        self.slow_tier_model = Reshape((slow_seq_len, self.slow_fs), name='sh_SL_8')(self.slow_tier_model)
+        self.slow_tier_model = Lambda(lambda x: scale_samples_for_rnn(x, q_levels=q_levels), name='slow_scale')(self.slow_tier_model_input)
+        self.slow_tier_model = Reshape((slow_seq_len, self.slow_fs), name='slow_reshape4rnn')(self.slow_tier_model)
 
-        self.slow_lstm_h =  K.variable(np.zeros((1, self.slow_dim)), dtype=K.floatx(), name='SLOW_H0')
-        self.slow_lstm_h0 = K.tile(self.slow_lstm_h, (batch_size,1))
-        self.slow_lstm_h.nonorm = True
-        self.mid_lstm_h = K.variable(np.zeros((1, self.dim)), dtype=K.floatx(), name='MID_H0')
-        self.mid_lstm_h.nonorm = True
-        self.mid_lstm_h0 = K.tile(self.mid_lstm_h, (batch_size, 1))
+        self.slow_rnn_h =  K.variable(np.zeros((1, self.slow_dim)), dtype=K.floatx(), name='show_h0')
+        self.slow_rnn_h0 = K.tile(self.slow_rnn_h, (batch_size,1))
+        self.mid_rnn_h = K.variable(np.zeros((1, self.dim)), dtype=K.floatx(), name='mid_h0')
+        self.mid_rnn_h0 = K.tile(self.mid_rnn_h, (batch_size, 1))
 
-        if self.learn_h0:
-
-
-            self.initial_state_mask = K.zeros((), dtype=K.floatx(), name='R0')
-            self.slow_lstm = GruLearnedH0(slow_dim,
-                                          use_bias=True,
-                                          name='slow_rnn',
-                                          recurrent_activation='sigmoid',
-                                          return_sequences=True,
-                                          stateful=self.stateful,
-                                          initial_state_mask=self.initial_state_mask,
-                                          weight_norm=self.weight_norm)
-            self.slow_lstm._trainable_weights.append(self.slow_lstm_h)
-            self.slow_tier_model = self.slow_lstm(self.slow_tier_model, initial_state=self.slow_lstm_h0)
-        else:
-            self.slow_lstm = GRU(slow_dim,
-                                          use_bias=True,
-                                          name='slow_rnn',
-                                          recurrent_activation='sigmoid',
-                                          return_sequences=True,
-                                          stateful=self.stateful)
-            self.slow_tier_model = self.slow_lstm(self.slow_tier_model)
-            self.mid_lstm_h0 = None
-            self.slow_lstm_h0 = None
-            self.initial_state_mask = K.zeros((), dtype=K.floatx(), name='R0')
+        self.state_selector = K.zeros((), dtype=K.floatx(), name='slow_state_mask')
+        self.slow_rnn = GruLearnedH0(slow_dim,
+                                      use_bias=True,
+                                      name='slow_rnn',
+                                      recurrent_activation='sigmoid',
+                                      return_sequences=True,
+                                      stateful=self.stateful,
+                                      state_selector=self.state_selector,
+                                      weight_norm=self.weight_norm)
+        self.slow_rnn._trainable_weights.append(self.slow_rnn_h)
+        self.slow_tier_model = self.slow_rnn(self.slow_tier_model, initial_state=self.slow_rnn_h0)
 
         # upscale slow rnn output to mid tier ticking freq
         self.slow_tier_model = TimeDistributed(
-            DenseHe(dim * slow_fs / mid_fs,
+            DenseWithWeightNorm(dim * slow_fs / mid_fs,
                     weight_norm=self.weight_norm,
-                    ), name='up_SL_DIMx4')\
+                    ), name='slow_project2mid')\
             (self.slow_tier_model)
-        self.slow_tier_model = Reshape((mid_seq_len, dim), name='sh_ML_DIM')(self.slow_tier_model)
+        self.slow_tier_model = Reshape((mid_seq_len, dim), name='slow_reshape4mid')(self.slow_tier_model)
                 
         self.mid_tier_model_input = Input(batch_shape=(batch_size, mid_seq_len * mid_fs, 1))
-        self.mid_tier_model = Lambda(lambda x: scale_samples_for_rnn(x, q_levels=q_levels), name='scalemid_2')(self.mid_tier_model_input)
-        self.mid_tier_model = Reshape((mid_seq_len, self.mid_fs), name='sh_ML_2')(self.mid_tier_model)
-        mid_proj = DenseHe(dim, name='up_mid_DIM', weight_norm=self.weight_norm)
-        self.mid_tier_model = TimeDistributed(mid_proj, name='td_ML_DIM')(self.mid_tier_model)
+        self.mid_tier_model = Lambda(lambda x: scale_samples_for_rnn(x, q_levels=q_levels), name='mid_scale')(self.mid_tier_model_input)
+        self.mid_tier_model = Reshape((mid_seq_len, self.mid_fs), name='mid_reshape2rnn')(self.mid_tier_model)
+        mid_proj = DenseWithWeightNorm(dim, name='mid_project2rnn', weight_norm=self.weight_norm)
+        self.mid_tier_model = TimeDistributed(mid_proj, name='mid_project2rnn')(self.mid_tier_model)
         self.mid_tier_model = layers.add([self.mid_tier_model, self.slow_tier_model])
-        if self.learn_h0:
-            self.mid_lstm = GruLearnedH0(dim,
-                                     name='mid_rnn',
-                                     return_sequences=True,
-                                     recurrent_activation='sigmoid',
-                                     stateful=self.stateful,
-                                     initial_state_mask=self.initial_state_mask)
+        self.mid_rnn = GruLearnedH0(dim,
+                                 name='mid_rnn',
+                                 return_sequences=True,
+                                 recurrent_activation='sigmoid',
+                                 stateful=self.stateful,
+                                 state_selector=self.state_selector)
 
-            self.mid_lstm._trainable_weights.append(self.mid_lstm_h)
-            self.mid_tier_model = self.mid_lstm(self.mid_tier_model, initial_state=self.mid_lstm_h0)
-        else:
-            self.mid_lstm = GRU(dim,
-                                         name='mid_rnn',
-                                         use_bias=True,
-                                         #recurrent_activation='sigmoid',
-                                         return_sequences=True,
-                                         stateful=self.stateful)
-            self.mid_tier_model = self.mid_lstm(self.mid_tier_model)
-
-        self.mid_adapter = DenseHe(dim * mid_fs, name='up_DIMx2',
+        self.mid_rnn._trainable_weights.append(self.mid_rnn_h)
+        self.mid_tier_model = self.mid_rnn(self.mid_tier_model, initial_state=self.mid_rnn_h0)
+        self.mid_adapter = DenseWithWeightNorm(dim * mid_fs, name='mid_project2top',
                                    weight_norm=self.weight_norm)
-        self.mid_tier_model = TimeDistributed(self.mid_adapter, name='td_ML_DIMx2')(self.mid_tier_model)
-        self.mid_tier_model = Reshape((mid_seq_len * mid_fs, dim), name='sh_SLxDIM')(self.mid_tier_model)
+        self.mid_tier_model = TimeDistributed(self.mid_adapter, name='mid_project2top')(self.mid_tier_model)
+        self.mid_tier_model = Reshape((mid_seq_len * mid_fs, dim), name='mid_reshape4top')(self.mid_tier_model)
         self.embed_size=256
         self.sframe = SFrame()
         self.top_tier_model_input = self.sframe.build_sframe_model((batch_size, prev_sample_seq_len, 1),
                                                               frame_size=self.mid_fs,
                                                               q_levels=self.q_levels,
                                                               embed_size=self.embed_size)
-        self.top_adapter = DenseHe(dim,
+        self.top_adapter = DenseWithWeightNorm(dim,
                                    use_bias=False,
-                                   name='up_top_DIM',
+                                   name='top_project2mlp',
                                    kernel_initializer='lecun_uniform',
                                    weight_norm=self.weight_norm)
-        self.top_tier_model = TimeDistributed(self.top_adapter, name='td_SL_DIM')(self.top_tier_model_input.output)
+        self.top_tier_model = TimeDistributed(self.top_adapter, name='top_project2mpl')(self.top_tier_model_input.output)
 
         self.top_tier_model_input_from_mid_tier = Input(batch_shape=(batch_size, 1, dim))
         self.top_tier_model_input_predictor = Input(batch_shape=(batch_size, mid_fs, 1))
         self.top_tier_model = layers.add([self.mid_tier_model, self.top_tier_model])
 
-        self.top_tier_mlp_l1 = DenseHe(dim, activation=mlp_activation, name='mlp_1', weight_norm=self.weight_norm)
-        self.top_tier_mlp_l2 = DenseHe(dim, activation=mlp_activation, name='mlp_2', weight_norm=self.weight_norm)
-        self.top_tier_mlp_l3 = DenseHe(q_levels,
+        self.top_tier_mlp_l1 = DenseWithWeightNorm(dim, activation=mlp_activation, name='mlp_1', weight_norm=self.weight_norm)
+        self.top_tier_mlp_l2 = DenseWithWeightNorm(dim, activation=mlp_activation, name='mlp_2', weight_norm=self.weight_norm)
+        self.top_tier_mlp_l3 = DenseWithWeightNorm(q_levels,
                                        kernel_initializer='lecun_uniform',
                                        name='mlp_3',
                                        weight_norm=self.weight_norm)
 
-        self.top_tier_model = TimeDistributed(self.top_tier_mlp_l1)(self.top_tier_model)
-        self.top_tier_model = TimeDistributed(self.top_tier_mlp_l2)(self.top_tier_model)
-        self.top_tier_model = TimeDistributed(self.top_tier_mlp_l3)(self.top_tier_model)
+        self.top_tier_model = TimeDistributed(self.top_tier_mlp_l1, name='mlp_1')(self.top_tier_model)
+        self.top_tier_model = TimeDistributed(self.top_tier_mlp_l2, name='mlp_2')(self.top_tier_model)
+        self.top_tier_model = TimeDistributed(self.top_tier_mlp_l3, name='mlp_3')(self.top_tier_model)
 
 
         self.mid_tier_model_input_from_slow_tier = Input(batch_shape=(batch_size, 1, dim))
@@ -344,6 +315,9 @@ class SRNN(object):
                            self.top_tier_model_input.input],
                           self.top_tier_model)
         
+        ################################################################################
+        ################## Model to sample from (predictor)
+        ################################################################################
 
         ################################################################################
         ################## Slow tier predictor
@@ -360,14 +334,18 @@ class SRNN(object):
         self.mid_tier_model_predictor = Reshape((1, self.mid_fs))(self.mid_tier_model_predictor)
         self.mid_tier_model_predictor = TimeDistributed(mid_proj)(self.mid_tier_model_predictor)
         self.mid_tier_model_predictor = layers.add([self.mid_tier_model_predictor, self.mid_tier_model_input_from_slow_tier])
+        """ Creating new layer instead of sharing it with the model to train
+        due to https://github.com/keras-team/keras/issues/6939
+        Sharing statefull layers gives a crosstalk
+        """
         self.predictor_mid_rnn = GruLearnedH0(self.dim,
                                name='mid_rnn',
                                return_sequences=True,
                                recurrent_activation='sigmoid',
                                stateful=self.stateful,
-                               initial_state_mask=self.initial_state_mask)
-        self.mid_tier_model_predictor = self.predictor_mid_rnn(self.mid_tier_model_predictor, initial_state=self.mid_lstm_h0)
-        self.predictor_mid_rnn.set_weights(self.mid_lstm.get_weights()[1:])
+                               state_selector=self.state_selector)
+        self.mid_tier_model_predictor = self.predictor_mid_rnn(self.mid_tier_model_predictor, initial_state=self.mid_rnn_h0)
+        self.predictor_mid_rnn.set_weights(self.mid_rnn.get_weights()[1:])
         self.mid_tier_model_predictor = TimeDistributed(self.mid_adapter)(self.mid_tier_model_predictor)
         self.mid_tier_model_predictor = Reshape((mid_fs, dim))(self.mid_tier_model_predictor)
         self.mid_tier_model_predictor = Model([self.mid_tier_model_input_predictor,
@@ -394,49 +372,48 @@ class SRNN(object):
 
         def categorical_crossentropy(target, output):
             new_target_shape = [
-                target.shape[i]
-                for i in xrange(K.ndim(target) - 1)
+                K.shape(output)[i]
+                for i in xrange(K.ndim(output) - 1)
             ]
             output = K.reshape(output, (-1, self.q_levels))
             xdev = output - K.max(output, axis=1, keepdims=True)
             lsm = xdev - K.log(K.sum(K.exp(xdev), axis=1, keepdims=True))
             cost = - K.sum(lsm * K.reshape(target, (-1, self.q_levels)), axis=1)
             log2e = K.variable(np.float32(np.log2(np.e)))
+            print ('a', new_target_shape)
             return K.reshape(cost, new_target_shape) * log2e
         
         self.srnn.compile(loss=categorical_crossentropy,
                           optimizer=keras.optimizers.Adam(clipvalue=1.),
                           sample_weight_mode='temporal')
         
-    def set_h0_mask(self, v):
-        if v:
+    def set_h0_selector(self, use_learned_h0):
+        if use_learned_h0:
             self.srnn.reset_states()
-            self.slow_lstm.reset_states()
-            self.mid_lstm.reset_states()
+            self.slow_rnn.reset_states()
+            self.mid_rnn.reset_states()
             self.slow_tier_model_predictor.reset_states()
             self.mid_tier_model_predictor.reset_states()
-            K.set_value(self.initial_state_mask, np.ones(()))
+            K.set_value(self.state_selector, np.ones(()))
         else:
-            K.set_value(self.initial_state_mask, np.zeros(()))
+            K.set_value(self.state_selector, np.zeros(()))
         
     def save_weights(self, file_name):
-        if self.learn_h0:
-            self.mid_lstm._trainable_weights.remove(self.mid_lstm_h)
-            self.slow_lstm._trainable_weights.remove(self.slow_lstm_h)
+        self.mid_rnn._trainable_weights.remove(self.mid_rnn_h)
+        self.slow_rnn._trainable_weights.remove(self.slow_rnn_h)
 
         self.srnn.save_weights(file_name)
 
-        if self.learn_h0:
-            self.mid_lstm._trainable_weights.append(self.mid_lstm_h)
-            self.slow_lstm._trainable_weights.append(self.slow_lstm_h)
+        self.mid_rnn._trainable_weights.append(self.mid_rnn_h)
+        self.slow_rnn._trainable_weights.append(self.slow_rnn_h)
 
     def load_weights(self, file_name):
-        self.mid_lstm._trainable_weights.remove(self.mid_lstm_h)
-        self.slow_lstm._trainable_weights.remove(self.slow_lstm_h)
+        self.mid_rnn._trainable_weights.remove(self.mid_rnn_h)
+        self.slow_rnn._trainable_weights.remove(self.slow_rnn_h)
         self.srnn.load_weights(file_name)
-        self.predictor_mid_rnn.set_weights(self.mid_lstm.get_weights())
-        self.mid_lstm._trainable_weights.append(self.mid_lstm_h)
-        self.slow_lstm._trainable_weights.append(self.slow_lstm_h)
+        self.predictor_mid_rnn.set_weights(self.mid_rnn.get_weights())
+        self.mid_rnn._trainable_weights.append(self.mid_rnn_h)
+        self.slow_rnn._trainable_weights.append(self.slow_rnn_h)
 
     def numpy_one_hot(self, labels_dense, n_classes):
         """Convert class labels from scalars to one-hot vectors."""
@@ -460,10 +437,6 @@ class SRNN(object):
         if mask is None:
             mask = np.ones((x.shape[0], x.shape[1]))
         target_mask = mask[:, self.slow_fs:]
-        #print(np.where(target[0]==1))
-        #import ipdb; ipdb.set_trace()  # XXX BREAKPOINT
-        #raise ValueError()
-
         return x_slow, x_mid, x_prev, target, target_mask
     
     def train_on_batch(self, x, mask=None):
@@ -518,11 +491,9 @@ class SRNN(object):
         samples = np.zeros((1, ts, 1), dtype='int32')
         Q_ZERO=self.q_levels // 2
         samples[:, :self.slow_fs] = Q_ZERO
-        #samples[0, 6:8]=250
-        
         big_frame_level_outputs = None
         frame_level_outputs = None
-        self.set_h0_mask(False)
+        self.set_h0_selector(False)
 
         for t in xrange(self.slow_fs, ts):
             if t % self.slow_fs == 0:
