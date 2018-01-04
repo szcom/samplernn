@@ -30,12 +30,10 @@ except ImportError:
 import logging
 
 sys.setrecursionlimit(40000)
-
 """
 init logging
 """
-logging.basicConfig(level=logging.INFO,
-                    format='%(message)s')
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 string_f = StringIO()
@@ -48,6 +46,7 @@ logger.addHandler(ch)
 end logging
 """
 
+
 def numpy_one_hot(labels_dense, n_classes=10):
     """Convert class labels from scalars to one-hot vectors."""
     labels_shape = labels_dense.shape
@@ -58,7 +57,7 @@ def numpy_one_hot(labels_dense, n_classes=10):
     labels_one_hot = np.zeros((n_labels, n_classes))
     labels_one_hot[np.arange(n_labels).astype("int32"),
                    labels_dense.ravel()] = 1
-    labels_one_hot = labels_one_hot.reshape(labels_shape+(n_classes,))
+    labels_one_hot = labels_one_hot.reshape(labels_shape + (n_classes, ))
     return labels_one_hot.astype(labels_dtype)
 
 
@@ -69,22 +68,27 @@ def tokenize_ind(phrase, vocabulary):
     phrase = numpy_one_hot(phrase, vocabulary_size)
     return phrase
 
+
 def filter_tokenize_ind(phrase, vocabulary):
     vocabulary_size = len(vocabulary.keys())
     filter_ = [char_ in vocabulary.keys() for char_ in phrase]
-    phrase = [vocabulary[char_] for char_, cond in zip(phrase, filter_) if cond]
+    phrase = [
+        vocabulary[char_] for char_, cond in zip(phrase, filter_) if cond
+    ]
     phrase = np.array(phrase, dtype='int32').ravel()
     phrase = numpy_one_hot(phrase, vocabulary_size)
     return phrase
 
+
 def apply_quantize_preproc_to_normalized(X, n_bins=256):
     bins = np.linspace(0, 1, n_bins)
+
     def binn(x):
         shp = x.shape
         return (np.digitize(x.ravel(), bins) - 1).reshape(shp)
+
     X = [binn(Xi) for Xi in X]
     return X
-
 
 
 def soundsc(X, copy=True):
@@ -117,6 +121,7 @@ def soundsc(X, copy=True):
 class BlizzardThread(threading.Thread):
     cnt_finished = 0
     """Blizzard Thread"""
+
     def __init__(self, queue, out_queue, preproc_fn, char2code, frame_size):
         threading.Thread.__init__(self)
         self.queue = queue
@@ -135,16 +140,23 @@ class BlizzardThread(threading.Thread):
                 BlizzardThread.cnt_finished += 1
                 self.queue.task_done()
                 return
-            text_group = [filter_tokenize_ind(t.lower(), self.char2code) for t in texts]
+            text_group = [
+                filter_tokenize_ind(t.lower(), self.char2code) for t in texts
+            ]
             wav_group = [wavfile.read(wp) for wp in wav_paths]
             wav_group_samples = [w.astype('float64') for fs, w in wav_group]
-            
-            wav_group_samples = [(w - np.min(w))/(np.max(w) - np.min(w)) for w in wav_group_samples]
 
-            wav_group_samples = [self.preproc_fn(wi, self.frame_size) for wi in wav_group_samples]
+            wav_group_samples = [(w - np.min(w)) / (np.max(w) - np.min(w))
+                                 for w in wav_group_samples]
+
+            wav_group_samples = [
+                self.preproc_fn(wi, self.frame_size)
+                for wi in wav_group_samples
+            ]
 
             self.out_queue.put((wav_group_samples, text_group))
             self.queue.task_done()
+
 
 def wav_to_qbins_frames(x, frame_size, n_bins=256):
 
@@ -153,12 +165,14 @@ def wav_to_qbins_frames(x, frame_size, n_bins=256):
     if frame_size == 1:
         return x
     append = np.zeros((frame_size - len(x) % frame_size))
-    x = np.hstack((x, apply_quantize_preproc([append], mn=x.min(), mx=x.max())[0]))
+    x = np.hstack((x, apply_quantize_preproc([append], mn=x.min(),
+                                             mx=x.max())[0]))
     return x.reshape(-1, frame_size)
-            
+
 
 class Blizzard_dataset(object):
-    def __init__(self, minibatch_size=2,
+    def __init__(self,
+                 minibatch_size=2,
                  wav_folder_path='wavn_fruit',
                  prompt_path='prompts_fruit.txt',
                  preproc_fn=lambda x: x,
@@ -174,10 +188,10 @@ class Blizzard_dataset(object):
 
         with open(self.prompt_path, 'r') as f:
             tt = [t.strip().split('\t') for t in f.readlines()]
-            tt=sorted(tt, key=lambda u: len(u[1]))
+            tt = sorted(tt, key=lambda u: len(u[1]))
             if isinstance(fraction_range[1], float):
-                fraction_range[0] = int(fraction_range[0]*len(tt))
-                fraction_range[1] = int(fraction_range[1]*len(tt))
+                fraction_range[0] = int(fraction_range[0] * len(tt))
+                fraction_range[1] = int(fraction_range[1] * len(tt))
             tt = tt[fraction_range[0]:fraction_range[1]]
 
             wav_names = [t[0] for t in tt]
@@ -188,10 +202,10 @@ class Blizzard_dataset(object):
             self.wav_names = wav_names
             self.text = raw_text
             self.symbols = sorted(list(all_symbols))
-        all_chars = ([chr(ord('a') + i) for i in range(26)] +
-                     [',', '.', '!', '?', '<UNK>'])
+        all_chars = ([chr(ord('a') + i)
+                      for i in range(26)] + [',', '.', '!', '?', '<UNK>'])
         self.symbols = all_chars
-        all_symbols = all_chars ###ZZZ override
+        all_symbols = all_chars  ###ZZZ override
 
         self.wav_paths = glob.glob(os.path.join(self.wav_folder_path, '*.wav'))
         self.minibatch_size = minibatch_size
@@ -199,7 +213,6 @@ class Blizzard_dataset(object):
         self.code2char = dict(enumerate(all_symbols))
         self.char2code = {v: k for k, v in self.code2char.items()}
         self.vocabulary_size = len(self.char2code.keys())
-
 
         # Get only the smallest 50% of files for now
         _cut = np.percentile(self._lens, 5)
@@ -213,7 +226,7 @@ class Blizzard_dataset(object):
         final_wav_names = []
         for n, (w, t) in enumerate(zip(self.wav_names, self.text)):
             parts = w.split("chp")
-                
+
             name = parts[0]
             if len(parts) == 1:
                 chapter = 'wav'
@@ -229,8 +242,8 @@ class Blizzard_dataset(object):
         random.seed(56)
         pack = list(zip(final_wav_paths, final_wav_names, final_text))
         random.shuffle(pack)
-        ### TURN OFF SHUFFLE !!!!ZZZZ final_wav_paths, final_wav_names, final_text = zip(*pack)
-        #print ('############################ wavs', final_wav_names)
+        #XXX: TURN OFF SHUFFLE when debugging
+        final_wav_paths, final_wav_names, final_text = zip(*pack)
 
         self.wav_names = final_wav_names
         self.wav_paths = final_wav_paths
@@ -245,33 +258,32 @@ class Blizzard_dataset(object):
         self.input_qsize = 5
         self.min_input_qsize = 2
         if len(self.wav_paths) % self.minibatch_size != 0:
-            logger.info("WARNING: Sample size not an even multiple of minibatch size")
+            logger.info(
+                "WARNING: Sample size not an even multiple of minibatch size")
             logger.info("Truncating...")
             self.wav_paths = self.wav_paths[:-(
                 len(self.wav_paths) % self.minibatch_size)]
-            self.text = self.text[:-(
-                len(self.text) % self.minibatch_size)]
+            self.text = self.text[:-(len(self.text) % self.minibatch_size)]
 
         assert len(self.wav_paths) % self.minibatch_size == 0
         assert len(self.text) % self.minibatch_size == 0
 
-        self.grouped_wav_paths = zip(*[iter(self.wav_paths)] *
-                                      self.minibatch_size)
-        self.grouped_text = zip(*[iter(self.text)] *
-                                     self.minibatch_size)
+        self.grouped_wav_paths = zip(
+            *[iter(self.wav_paths)] * self.minibatch_size)
+        self.grouped_text = zip(*[iter(self.text)] * self.minibatch_size)
         assert len(self.grouped_wav_paths) == len(self.grouped_text)
 
     def _init_queues(self):
         # Infinite...
-        self.grouped_elements = itertools.cycle(zip(self.grouped_wav_paths,
-                                                    self.grouped_text))
+        self.grouped_elements = itertools.cycle(
+            zip(self.grouped_wav_paths, self.grouped_text))
         self.queue = Queue.Queue()
         self.out_queue = Queue.Queue(maxsize=self.buffer_size)
         self.it = []
         for i in range(self.thread_cnt):
-            self.it.append(BlizzardThread(self.queue, self.out_queue,
-                                     self._pre, self.char2code,
-                                     self.frame_size))
+            self.it.append(
+                BlizzardThread(self.queue, self.out_queue, self._pre,
+                               self.char2code, self.frame_size))
             self.it[-1].start()
 
         # Populate queue with some paths to image data
@@ -297,7 +309,7 @@ class Blizzard_dataset(object):
                 self.out_queue.queue.clear()
                 self.out_queue.not_full.notifyAll()
             for _ in range(self.thread_cnt):
-                exit_flag = ((None,), (None,))
+                exit_flag = ((None, ), (None, ))
                 self.queue.put(exit_flag, True)
             for t in self.it:
                 t.join()
@@ -318,9 +330,15 @@ class Blizzard_dataset(object):
             for i in range(self.input_qsize):
                 group = self.grouped_elements.next()
                 self.queue.put(group)
-        li = list_iterator([wav_group, text_group], self.minibatch_size, axis=1, start_index=0,
-                           stop_index=len(wav_group), make_mask=True)
+        li = list_iterator(
+            [wav_group, text_group],
+            self.minibatch_size,
+            axis=1,
+            start_index=0,
+            stop_index=len(wav_group),
+            make_mask=True)
         return next(li)
+
 
 class Blizzard_dataset_adapter(object):
     def __init__(self, ds, cut_len, overlap=0, q_zero=128):
@@ -335,20 +353,31 @@ class Blizzard_dataset_adapter(object):
             X_mb, X_mb_mask, c_mb, c_mb_mask = next(self.ds)
             batch_size = X_mb.shape[1]
             for part in xrange(X_mb.shape[0] // self.cut_len - 1):
-                x_part = X_mb[self.cut_len*part : self.cut_len*(part+1)].transpose(1, 0, 2)
-                x_part = np.concatenate([
-                    np.full((batch_size, self.overlap, 1), self.q_zero, dtype='int32'),
-                    x_part
-                ], axis=1)
+                x_part = X_mb[self.cut_len * part:self.cut_len * (
+                    part + 1)].transpose(1, 0, 2)
+                x_part = np.concatenate(
+                    [
+                        np.full(
+                            (batch_size, self.overlap, 1),
+                            self.q_zero,
+                            dtype='int32'), x_part
+                    ],
+                    axis=1)
 
-                x_mask_part = X_mb_mask[self.cut_len*part : self.cut_len*(part+1)].transpose(1, 0)
-                x_mask_part = np.concatenate([
-                    np.full((batch_size, self.overlap), 1, dtype='float32'),
-                    x_mask_part
-                ], axis=1)
+                x_mask_part = X_mb_mask[self.cut_len * part:self.cut_len * (
+                    part + 1)].transpose(1, 0)
+                x_mask_part = np.concatenate(
+                    [
+                        np.full(
+                            (batch_size, self.overlap), 1, dtype='float32'),
+                        x_mask_part
+                    ],
+                    axis=1)
 
-                yield (x_part, x_mask_part.astype('float32'), c_mb, c_mb_mask, np.int32(part==0))
-                
+                yield (x_part, x_mask_part.astype('float32'), c_mb, c_mb_mask,
+                       np.int32(part == 0))
+
+
 class Blizzard_dataset_adapter_nochars(object):
     def __init__(self, ds, cut_len, overlap=0, q_zero=128):
         self.ds = ds
@@ -362,25 +391,35 @@ class Blizzard_dataset_adapter_nochars(object):
             X_mb, X_mb_mask, c_mb, c_mb_mask = next(self.ds)
             batch_size = X_mb.shape[1]
             for part in xrange(X_mb.shape[0] // self.cut_len - 1):
-                x_part = X_mb[self.cut_len*part : self.cut_len*(part+1)].transpose(1, 0, 2)
-                x_part = np.concatenate([
-                    np.full((batch_size, self.overlap, 1), self.q_zero, dtype='int32'),
-                    x_part
-                ], axis=1)
+                x_part = X_mb[self.cut_len * part:self.cut_len * (
+                    part + 1)].transpose(1, 0, 2)
+                x_part = np.concatenate(
+                    [
+                        np.full(
+                            (batch_size, self.overlap, 1),
+                            self.q_zero,
+                            dtype='int32'), x_part
+                    ],
+                    axis=1)
 
-                x_mask_part = X_mb_mask[self.cut_len*part : self.cut_len*(part+1)].transpose(1, 0)
-                x_mask_part = np.concatenate([
-                    np.full((batch_size, self.overlap), 1, dtype='float32'),
-                    x_mask_part
-                ], axis=1)
-                
-                yield (x_part.reshape((batch_size, -1)), np.int32(part==0), x_mask_part.astype('float32'))
-                
+                x_mask_part = X_mb_mask[self.cut_len * part:self.cut_len * (
+                    part + 1)].transpose(1, 0)
+                x_mask_part = np.concatenate(
+                    [
+                        np.full(
+                            (batch_size, self.overlap), 1, dtype='float32'),
+                        x_mask_part
+                    ],
+                    axis=1)
 
+                yield (x_part.reshape((batch_size, -1)), np.int32(part == 0),
+                       x_mask_part.astype('float32'))
 
 
 class base_iterator(object):
-    def __init__(self, list_of_containers, minibatch_size,
+    def __init__(self,
+                 list_of_containers,
+                 minibatch_size,
                  axis,
                  start_index=0,
                  stop_index=np.inf,
@@ -496,7 +535,7 @@ class list_iterator(base_iterator):
                     new_sc = new_sc.astype(sc[0].dtype)
                     for m, sc_i in enumerate(sc):
                         if len(sc_i.shape) == 1:
-                            new_sc[:len(sc_i), m, :] = sc_i.reshape(-1,1)
+                            new_sc[:len(sc_i), m, :] = sc_i.reshape(-1, 1)
                         else:
                             new_sc[:len(sc_i), m, :] = sc_i
                 sliced_c[n] = new_sc
@@ -509,7 +548,7 @@ class list_iterator(base_iterator):
                     else:
                         sliced_c[n] = sc.transpose(1, 0, 2)
         return sliced_c
-    
+
     def _slice_with_masks(self, ind):
         cs = self._slice_without_masks(ind)
         if self.axis == 0:
@@ -543,13 +582,5 @@ def numpy_one_hot(labels_dense, n_classes=10):
     labels_one_hot = np.zeros((n_labels, n_classes))
     labels_one_hot[np.arange(n_labels).astype("int32"),
                    labels_dense.ravel()] = 1
-    labels_one_hot = labels_one_hot.reshape(labels_shape+(n_classes,))
+    labels_one_hot = labels_one_hot.reshape(labels_shape + (n_classes, ))
     return labels_one_hot.astype(labels_dtype)
-
-
-
-
-
-
-
-
