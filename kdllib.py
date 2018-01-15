@@ -243,7 +243,7 @@ class Blizzard_dataset(object):
         pack = list(zip(final_wav_paths, final_wav_names, final_text))
         random.shuffle(pack)
         #XXX: TURN OFF SHUFFLE when debugging
-        final_wav_paths, final_wav_names, final_text = zip(*pack)
+        ## final_wav_paths, final_wav_names, final_text = zip(*pack)
 
         self.wav_names = final_wav_names
         self.wav_paths = final_wav_paths

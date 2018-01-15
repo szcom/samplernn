@@ -1,11 +1,15 @@
 import numpy as np
 import keras.optimizers
 import keras.regularizers
+import warnings
 from keras import layers
 from keras.layers import Input, Dense, TimeDistributed
-from keras.layers import Lambda, GRU, Reshape
+from keras.layers import Lambda, GRU, Reshape, GRUCell
 from keras.models import Model
 from keras import backend as K
+from keras import regularizers
+from keras.legacy import interfaces
+
 
 from keras.engine import InputSpec
 
@@ -37,143 +41,58 @@ def weight_norm_regularizer(layer, weight):
     """
     w_norm = K.cast_to_floatx(np.linalg.norm(K.get_value(weight), axis=0))
     g = layer.add_weight(
-        "{}_{}_g".format(layer.name,
+        name="{}_{}_g".format(layer.name,
                          weight.name.split(':')[-1]),
-        w_norm.shape,
+        shape=w_norm.shape,
         initializer=keras.initializers.Constant(w_norm))
     normed_weight = weight * (g / l2norm(weight))
     return normed_weight
 
+class GRUCellWithWeightNorm(GRUCell):
+    def __init__(self, *args, **kwargs):
+
+        self.weight_norm = kwargs.pop('weight_norm', True)
+        super(GRUCellWithWeightNorm, self).__init__(*args, **kwargs)
+
+
+    def add_weight(self, *args, **kwargs):
+        name = kwargs['name']
+        print("parameters name", name)
+        w = super(GRUCellWithWeightNorm, self).add_weight(*args, **kwargs)
+        if self.weight_norm == False:
+            return w
+        if name == "kernel" or name == "recurrent_kernel":
+            print("do weight norm", name)
+            return weight_norm_regularizer(self, w)
+        return w
+
 
 class GruWithWeightNorm(GRU):
-    def __init__(self, *args, **kwargs):
-        self.state_selector = kwargs.pop('state_selector')
-        if 'weight_norm' in kwargs:
-            self.weight_norm = kwargs.pop('weight_norm')
-        else:
-            self.weight_norm = True
-
-        super(GruWithWeightNorm, self).__init__(*args, **kwargs)
-
-    def build(self, input_shape):
-        if isinstance(input_shape, list):
-            input_shape = input_shape[0]
-
-        batch_size = input_shape[0] if self.stateful else None
-        self.input_dim = input_shape[2]
-        self.input_spec[0] = InputSpec(
-            shape=(batch_size, None, self.input_dim))
-
-        self.states = [None]
-        if self.stateful:
-            self.reset_states()
-
-        self.kernel = self.add_weight(
-            shape=(self.input_dim, self.units * 3),
-            name='kernel',
-            initializer=self.kernel_initializer,
-            regularizer=self.kernel_regularizer,
-            constraint=self.kernel_constraint)
-        self.recurrent_kernel = self.add_weight(
-            shape=(self.units, self.units * 3),
-            name='recurrent_kernel',
-            initializer=self.recurrent_initializer,
-            regularizer=self.recurrent_regularizer,
-            constraint=self.recurrent_constraint)
-
-        if self.weight_norm:
-            self.kernel = weight_norm_regularizer(self, self.kernel)
-            self.recurrent_kernel = weight_norm_regularizer(
-                self, self.recurrent_kernel)
-
-        if self.use_bias:
-            self.bias = self.add_weight(
-                shape=(self.units * 3, ),
-                name='bias',
-                initializer=self.bias_initializer,
-                regularizer=self.bias_regularizer,
-                constraint=self.bias_constraint)
-        else:
-            self.bias = None
-
-        self.kernel_z = self.kernel[:, :self.units]
-        self.recurrent_kernel_z = self.recurrent_kernel[:, :self.units]
-        self.kernel_r = self.kernel[:, self.units:self.units * 2]
-        self.recurrent_kernel_r = self.recurrent_kernel[:, self.units:
-                                                        self.units * 2]
-        self.kernel_h = self.kernel[:, self.units * 2:]
-        self.recurrent_kernel_h = self.recurrent_kernel[:, self.units * 2:]
-
-        if self.use_bias:
-            self.bias_z = self.bias[:self.units]
-            self.bias_r = self.bias[self.units:self.units * 2]
-            self.bias_h = self.bias[self.units * 2:]
-        else:
-            self.bias_z = None
-            self.bias_r = None
-            self.bias_h = None
-        self.built = True
+    def __init__(self,
+                 *args,
+                 **kwargs):
+        self.state_selector = kwargs.pop('state_selector', None)
+        self.weight_norm = kwargs.pop('weight_norm', True)
+        super(GruWithWeightNorm, self).__init__(*args,
+                                  **kwargs)
+        kwargs.pop('stateful')
+        kwargs.pop('return_sequences')
+        kwargs['weight_norm'] = self.weight_norm
+        self.cell = GRUCellWithWeightNorm(*args,
+                       **kwargs)
 
     def call(self, inputs, mask=None, training=None, initial_state=None):
-        # input shape: `(samples, time (padded with zeros), input_dim)`
-        # note that the .build() method of subclasses MUST define
-        # self.input_spec and self.state_spec with complete input shapes.
-        if not self.stateful:
-            raise ValueError("Must be stateful")
-        if initial_state is None:
-            raise ValueError("Must have initial state to learn")
-
         initial_state = [
             K.switch(self.state_selector, init, state)
             for state, init in zip(self.states, initial_state)
         ]
+        return super(GruWithWeightNorm, self).call(inputs,
+                                     mask=mask,
+                                     training=training,
+                                     initial_state=initial_state)
 
-        if isinstance(mask, list):
-            mask = mask[0]
 
-        if len(initial_state) != len(self.states):
-            raise ValueError('Layer has ' + str(len(self.states)) +
-                             ' states but was passed ' +
-                             str(len(initial_state)) + ' initial states.')
-        input_shape = K.int_shape(inputs)
-        if self.unroll and input_shape[1] is None:
-            raise ValueError('Cannot unroll a RNN if the '
-                             'time dimension is undefined. \n'
-                             '- If using a Sequential model, '
-                             'specify the time dimension by passing '
-                             'an `input_shape` or `batch_input_shape` '
-                             'argument to your first layer. If your '
-                             'first layer is an Embedding, you can '
-                             'also use the `input_length` argument.\n'
-                             '- If using the functional API, specify '
-                             'the time dimension by passing a `shape` '
-                             'or `batch_shape` argument to your Input layer.')
-        constants = self.get_constants(inputs, training=None)
-        preprocessed_input = self.preprocess_input(inputs, training=None)
-        last_output, outputs, states = K.rnn(
-            self.step,
-            preprocessed_input,
-            initial_state,
-            go_backwards=self.go_backwards,
-            mask=mask,
-            constants=constants,
-            unroll=self.unroll,
-            input_length=input_shape[1])
-        if self.stateful:
-            updates = []
-            for i in range(len(states)):
-                updates.append((self.states[i], states[i]))
-            self.add_update(updates, inputs)
 
-        # Properly set learning phase
-        if 0 < self.dropout + self.recurrent_dropout:
-            last_output._uses_learning_phase = True
-            outputs._uses_learning_phase = True
-
-        if self.return_sequences:
-            return outputs
-        else:
-            return last_output
 
 
 class DenseWithWeightNorm(Dense):
@@ -257,7 +176,7 @@ class SRNN(object):
             stateful=self.stateful,
             state_selector=self.state_selector,
             weight_norm=self.weight_norm)
-        self.slow_rnn._trainable_weights.append(self.slow_rnn_h)
+        self.slow_rnn.cell._trainable_weights.append(self.slow_rnn_h)
         self.slow_tier_model = self.slow_rnn(
             self.slow_tier_model, initial_state=self.slow_rnn_h0)
 
@@ -292,7 +211,7 @@ class SRNN(object):
             stateful=self.stateful,
             state_selector=self.state_selector)
 
-        self.mid_rnn._trainable_weights.append(self.mid_rnn_h)
+        self.mid_rnn.cell._trainable_weights.append(self.mid_rnn_h)
         self.mid_tier_model = self.mid_rnn(
             self.mid_tier_model, initial_state=self.mid_rnn_h0)
         self.mid_adapter = DenseWithWeightNorm(
@@ -395,7 +314,7 @@ class SRNN(object):
             recurrent_activation='sigmoid',
             stateful=self.stateful,
             state_selector=self.state_selector)
-        self.predictor_mid_rnn._trainable_weights.append(self.mid_rnn_h)
+        self.predictor_mid_rnn.cell._trainable_weights.append(self.mid_rnn_h)
         self.mid_tier_model_predictor = self.predictor_mid_rnn(
             self.mid_tier_model_predictor, initial_state=self.mid_rnn_h0)
         self.predictor_mid_rnn.set_weights(self.mid_rnn.get_weights())
