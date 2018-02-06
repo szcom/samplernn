@@ -45,10 +45,8 @@ blizzard2013(~20h) | 8000 | 9000 | 100
 To start training run `THEANO_FLAGS=device=cpu,mode=FAST_RUN python train_srnn.py --exp=tiny --slowdim=32  --dim=32 --cutlen=512 --batchsize=2 --validstop=6 --trainstop=4`. This will create model with 32 hidden units in each layer and
 run tbpp for 512 timestamps (due to --cutlen=512). Using theano backend and CPU to compute.
 
-After about 3 epochs on blizzard2013 dataset model should be able to generate nice looking and
-even sounding samples. Here how it looks after nearly one epoch of 12 hours of free GPU at [Colab](https://colab.research.google.com) ![sample](/sample4s.png)
-The audio sample shown on the picture can be found in [sample4s.wav](/sample4s.wav)
-
+After about 3 epochs of the training on blizzard2013 dataset the model should be able to generate nice looking and
+even sounding samples.
 
 ## Sampling
 
@@ -56,7 +54,8 @@ Training process produces files named `<tiny|all>_srnn_sz<dim>_e<epoch>.h5` with
 `THEANO_FLAGS=device=cpu,mode=FAST_RUN python train_srnn.py --exp=tiny --slowdim=32  --dim=32 --cutlen=512 --batchsize=2 --validstop=6 --trainstop=4 --sample=<filename>` will produce *generated.wav*
 
 ## Sampling from pretrained model
-This repo contains a [file allmost_1e.h5](/allmost_1e.h5) with model weights after about 12 hours of training on K80 GPU using  about 20 hours of audio from Blizzard2013. Thus it is possible to try it right away and do audio sampling using following command `THEANO_FLAGS=device=cpu,mode=FAST_RUN python train_srnn.py --slowdim=1024  --dim=1024  --sample=allmost_1e.h5`. Which will use CPU and Theano backend to do the work
+This repo contains a [file allmost_1e.h5](/allmost_1e.h5) with model weights after about 12 hours of training on blizzard2013 using [Colab's K80 GPU](https://colab.research.google.com). Thus it is possible to try it right away and do audio sampling using following command `THEANO_FLAGS=device=cpu,mode=FAST_RUN python train_srnn.py --slowdim=1024  --dim=1024  --sample=allmost_1e.h5`. Which will use CPU and Theano backend to do the work and produce something like that ![sample](/sample4s.png)
+The audio sample shown on the picture can be found in [sample4s.wav](/sample4s.wav)
 
 
 
