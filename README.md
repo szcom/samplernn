@@ -30,7 +30,6 @@ Before we can start training audio must undergo some preprocessing. The process 
  1 | 3.9624 | 4.9070
  10 | 2.6645 | 4.2562
  
- If you have possibility to try this code on the larger dataset - please do that.
 
 ## Training
 Unfortunately start/stop indexes to separate validation and training data sets are to be picked manually.
@@ -57,7 +56,7 @@ Training process produces files named `<tiny|all>_srnn_sz<dim>_e<epoch>.h5` with
 `THEANO_FLAGS=device=cpu,mode=FAST_RUN python train_srnn.py --exp=tiny --slowdim=32  --dim=32 --cutlen=512 --batchsize=2 --validstop=6 --trainstop=4 --sample=<filename>` will produce *generated.wav*
 
 ## Sampling from pretrained model
-This repo contains a [file allmost_1e.h5](/allmost_1e.h5) with model weights after about 12 hours of training on K80 GPU. Thus it is possible to try it right away and do audio sampling using following command `THEANO_FLAGS=device=cpu,mode=FAST_RUN python train_srnn.py --slowdim=1024  --dim=1024  --sample=allmost_1e.h5`. Which will use CPU and Theano backend to do the work
+This repo contains a [file allmost_1e.h5](/allmost_1e.h5) with model weights after about 12 hours of training on K80 GPU using  about 20 hours of audio from Blizzard2013. Thus it is possible to try it right away and do audio sampling using following command `THEANO_FLAGS=device=cpu,mode=FAST_RUN python train_srnn.py --slowdim=1024  --dim=1024  --sample=allmost_1e.h5`. Which will use CPU and Theano backend to do the work
 
 
 
