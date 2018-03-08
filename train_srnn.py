@@ -126,23 +126,6 @@ if args.trainstop:
 if args.validstop:
     valid_stop_index = args.validstop
 
-frame_size = 1
-bliz_train = Blizzard_dataset(
-    minibatch_size=minibatch_size,
-    wav_folder_path='./blizzard/{}_parts/'.format(args.exp),
-    prompt_path='./blizzard/{}_parts/prompts.txt'.format(args.exp),
-    preproc_fn=wav_to_qbins_frames,
-    frame_size=frame_size,
-    fraction_range=[0, train_stop_index],
-    thread_cnt=1)
-bliz_valid = Blizzard_dataset(
-    minibatch_size=minibatch_size,
-    wav_folder_path='./blizzard/{}_parts/'.format(args.exp),
-    prompt_path='./blizzard/{}_parts/prompts.txt'.format(args.exp),
-    preproc_fn=wav_to_qbins_frames,
-    frame_size=frame_size,
-    fraction_range=[train_stop_index, valid_stop_index],
-    thread_cnt=1)
 
 random_state = np.random.RandomState(1999)
 np.random.seed(1337)
@@ -176,6 +159,24 @@ if args.sample:
     fs = args.samplerate
     wavfile.write("generated.wav", fs, soundsc(w))
     exit(0)
+
+frame_size = 1
+bliz_train = Blizzard_dataset(
+    minibatch_size=minibatch_size,
+    wav_folder_path='./blizzard/{}_parts/'.format(args.exp),
+    prompt_path='./blizzard/{}_parts/prompts.txt'.format(args.exp),
+    preproc_fn=wav_to_qbins_frames,
+    frame_size=frame_size,
+    fraction_range=[0, train_stop_index],
+    thread_cnt=1)
+bliz_valid = Blizzard_dataset(
+    minibatch_size=minibatch_size,
+    wav_folder_path='./blizzard/{}_parts/'.format(args.exp),
+    prompt_path='./blizzard/{}_parts/prompts.txt'.format(args.exp),
+    preproc_fn=wav_to_qbins_frames,
+    frame_size=frame_size,
+    fraction_range=[train_stop_index, valid_stop_index],
+    thread_cnt=1)
 
 srnn = SRNN(
     batch_size=minibatch_size,
