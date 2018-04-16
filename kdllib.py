@@ -79,6 +79,15 @@ def filter_tokenize_ind(phrase, vocabulary):
     phrase = numpy_one_hot(phrase, vocabulary_size)
     return phrase
 
+def get_vocabulary():
+    all_chars = ([chr(ord('a') + i)
+                  for i in range(26)] + [',', '.', '!', '?', '<UNK>'])
+    return all_chars
+
+def get_code2char_char2code_maps(all_symbols):
+    code2char = dict(enumerate(all_symbols))
+    char2code = {v: k for k, v in code2char.items()}
+    return code2char, char2code
 
 def apply_quantize_preproc_to_normalized(X, n_bins=256):
     bins = np.linspace(0, 1, n_bins)
@@ -202,8 +211,7 @@ class Blizzard_dataset(object):
             self.wav_names = wav_names
             self.text = raw_text
             self.symbols = sorted(list(all_symbols))
-        all_chars = ([chr(ord('a') + i)
-                      for i in range(26)] + [',', '.', '!', '?', '<UNK>'])
+        all_chars = get_vocabulary()
         self.symbols = all_chars
         all_symbols = all_chars  ###ZZZ override
 
@@ -340,7 +348,7 @@ class Blizzard_dataset(object):
         return next(li)
 
 
-class Blizzard_dataset_adapter(object):
+class TBPTTIter(object):
     def __init__(self, ds, cut_len, overlap=0, q_zero=128):
         self.ds = ds
         self.cut_len = cut_len
@@ -351,6 +359,9 @@ class Blizzard_dataset_adapter(object):
     def __iter__(self):
         while True:
             X_mb, X_mb_mask, c_mb, c_mb_mask = next(self.ds)
+            c_mb = c_mb.transpose(1, 0, 2)
+            c_mb_mask = c_mb_mask.transpose(1, 0)
+
             batch_size = X_mb.shape[1]
             for part in xrange(X_mb.shape[0] // self.cut_len - 1):
                 x_part = X_mb[self.cut_len * part:self.cut_len * (
@@ -373,7 +384,6 @@ class Blizzard_dataset_adapter(object):
                         x_mask_part
                     ],
                     axis=1)
-
                 yield (x_part, x_mask_part.astype('float32'), c_mb, c_mb_mask,
                        np.int32(part == 0))
 

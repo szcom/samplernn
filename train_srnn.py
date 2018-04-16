@@ -8,7 +8,7 @@ import numpy as np
 from scipy.io import wavfile
 from kdllib import soundsc
 from kdllib import Blizzard_dataset, wav_to_qbins_frames
-from kdllib import Blizzard_dataset_adapter
+from kdllib import TBPTTIter
 from keras import backend as K
 import keras
 from srnn import SRNN
@@ -155,7 +155,7 @@ if args.sample:
         print('failed to plot models to png')
         pass
 
-    w = pred_srnn.sample(4 * args.samplerate, random_state, args.debug)
+    w = pred_srnn.sample(4 * args.samplerate, random_state, args.debug, 'apple')
     fs = args.samplerate
     wavfile.write("generated.wav", fs, soundsc(w))
     exit(0)
@@ -163,16 +163,16 @@ if args.sample:
 frame_size = 1
 bliz_train = Blizzard_dataset(
     minibatch_size=minibatch_size,
-    wav_folder_path='./blizzard/{}_parts/'.format(args.exp),
-    prompt_path='./blizzard/{}_parts/prompts.txt'.format(args.exp),
+    wav_folder_path='./blizzard/{}/'.format(args.exp),
+    prompt_path='./blizzard/{}/prompts.txt'.format(args.exp),
     preproc_fn=wav_to_qbins_frames,
     frame_size=frame_size,
     fraction_range=[0, train_stop_index],
     thread_cnt=1)
 bliz_valid = Blizzard_dataset(
     minibatch_size=minibatch_size,
-    wav_folder_path='./blizzard/{}_parts/'.format(args.exp),
-    prompt_path='./blizzard/{}_parts/prompts.txt'.format(args.exp),
+    wav_folder_path='./blizzard/{}/'.format(args.exp),
+    prompt_path='./blizzard/{}/prompts.txt'.format(args.exp),
     preproc_fn=wav_to_qbins_frames,
     frame_size=frame_size,
     fraction_range=[train_stop_index, valid_stop_index],
@@ -212,13 +212,13 @@ for epoch in range(n_epochs):
     try:
         progbar = keras.utils.generic_utils.Progbar(train_stop_index)
         train_itr = iter(
-            Blizzard_dataset_adapter(
+            TBPTTIter(
                 bliz_train, cut_len=cut_len, overlap=SLOW_FS))
         while True:
             total_iterations += 1
             x_part, x_mask_part, c_mb, c_mb_mask, reset = next(train_itr)
             srnn.set_h0_selector(reset)
-            l = srnn.train_on_batch(x_part, x_mask_part)
+            l = srnn.train_on_batch(x_part, x_mask_part, c_mb, c_mb_mask)
             if reset:
                 progbar.add(x_part.shape[0], values=[("train loss", l)])
             epoch_train_loss.append(l)
@@ -237,12 +237,12 @@ for epoch in range(n_epochs):
         exit(-1)
     try:
         valid_itr = iter(
-            Blizzard_dataset_adapter(
+            TBPTTIter(
                 bliz_valid, cut_len=cut_len, overlap=SLOW_FS))
         while True:
             x_part, x_mask_part, c_mb, c_mb_mask, reset = next(valid_itr)
             srnn.set_h0_selector(reset)
-            l = srnn.test_on_batch(x_part, x_mask_part)
+            l = srnn.test_on_batch(x_part, x_mask_part, c_mb, c_mb_mask)
             epoch_valid_loss.append(l)
             # print("Validation cost:", l * np.log2(np.e), "This lh0.mean()", K.get_value(srnn.slow_lstm_h).mean())
 

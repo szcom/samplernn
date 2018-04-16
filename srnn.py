@@ -7,11 +7,9 @@ from keras.layers import Input, Dense, TimeDistributed
 from keras.layers import Lambda, GRU, Reshape, GRUCell
 from keras.models import Model
 from keras import backend as K
-from keras import regularizers
-from keras.legacy import interfaces
-
-
-from keras.engine import InputSpec
+from kdllib import get_vocabulary, get_code2char_char2code_maps
+from kdllib import filter_tokenize_ind
+import gravesatt
 
 from sframe import SFrame
 
@@ -25,6 +23,7 @@ OVERLAP = SLOW_FS
 SUB_SEQ_LEN = 16
 N_TRAIN = 20
 BATCH_SIZE = N_TRAIN
+ABET_SIZE = 31
 
 
 def l2norm(x, axis=0):
@@ -151,6 +150,9 @@ class SRNN(object):
 
         self.slow_tier_model_input = Input(
             batch_shape=(batch_size, slow_seq_len * slow_fs, 1))
+        self.slow_tier_model_input_txt = keras.Input(batch_shape=(batch_size, None, ABET_SIZE))
+        self.slow_tier_model_input_txt_mask = keras.Input(batch_shape=(batch_size, None))
+
         self.slow_tier_model = Lambda(
             lambda x: scale_samples_for_rnn(x, q_levels=q_levels),
             name='slow_scale')(self.slow_tier_model_input)
@@ -160,26 +162,41 @@ class SRNN(object):
 
         self.slow_rnn_h = K.variable(
             np.zeros((1, self.slow_dim)), dtype=K.floatx(), name='show_h0')
-        self.slow_rnn_h0 = K.tile(self.slow_rnn_h, (batch_size, 1))
         self.mid_rnn_h = K.variable(
             np.zeros((1, self.dim)), dtype=K.floatx(), name='mid_h0')
         self.mid_rnn_h0 = K.tile(self.mid_rnn_h, (batch_size, 1))
 
         self.state_selector = K.zeros(
             (), dtype=K.floatx(), name='slow_state_mask')
-        self.slow_rnn = GruWithWeightNorm(
-            slow_dim,
-            use_bias=True,
-            name='slow_rnn',
-            recurrent_activation='sigmoid',
-            return_sequences=True,
-            stateful=self.stateful,
-            state_selector=self.state_selector,
-            weight_norm=self.weight_norm)
-        self.slow_rnn.cell._trainable_weights.append(self.slow_rnn_h)
-        self.slow_tier_model = self.slow_rnn(
-            self.slow_tier_model, initial_state=self.slow_rnn_h0)
+        self.slow_rnn_cell = gravesatt.GravesAttentionCell(slow_dim,
+                                                 nof_mixtures=10,
+                                                 state_selector=self.state_selector,
+                                                 learned_h=self.slow_rnn_h,
+                                                 abet_size=ABET_SIZE
+                                                 )
+        self.slow_rnn = gravesatt.GravesRnn(self.slow_rnn_cell,
+                                  return_sequences=True,
+                                  return_state=True,
+                                  stateful=True)
 
+
+
+        slow_output, _, _ = self.slow_rnn(
+            self.slow_tier_model,
+            constants=[self.slow_tier_model_input_txt,
+                       self.slow_tier_model_input_txt_mask]
+        )
+        c_w = TimeDistributed(self.slow_rnn_cell.get_char_pval())(slow_output)
+
+        self.slow_tier_model = TimeDistributed(self.slow_rnn_cell.get_gru_output())(slow_output)
+        print("char win shape", K.int_shape(c_w))
+
+        c_w_proj_slow = TimeDistributed(
+            DenseWithWeightNorm(slow_dim,
+                                weight_norm=self.weight_norm),
+            name='char_win2slow')(c_w)
+        self.slow_tier_model = layers.add(
+            [c_w_proj_slow, self.slow_tier_model])
         # upscale slow rnn output to mid tier ticking freq
         self.slow_tier_model = TimeDistributed(
             DenseWithWeightNorm(dim * slow_fs / mid_fs,
@@ -274,8 +291,11 @@ class SRNN(object):
             batch_shape=(batch_size, mid_fs, 1))
 
         self.srnn = Model([
-            self.slow_tier_model_input, self.mid_tier_model_input,
-            self.top_tier_model_input.input
+            self.slow_tier_model_input,
+            self.mid_tier_model_input,
+            self.top_tier_model_input.input,
+            self.slow_tier_model_input_txt,
+            self.slow_tier_model_input_txt_mask
         ], self.top_tier_model)
 
         ################################################################################
@@ -286,7 +306,10 @@ class SRNN(object):
         ################## Slow tier predictor
         ################################################################################
         self.slow_tier_model_predictor = Model(
-            inputs=self.slow_tier_model_input, outputs=self.slow_tier_model)
+            inputs=[self.slow_tier_model_input,
+                    self.slow_tier_model_input_txt,
+                    self.slow_tier_model_input_txt_mask],
+            outputs=self.slow_tier_model)
 
         ################################################################################
         ################## Mid tier predictor
@@ -413,20 +436,20 @@ class SRNN(object):
         target_mask = mask[:, self.slow_fs:]
         return x_slow, x_mid, x_prev, target, target_mask
 
-    def train_on_batch(self, x, mask=None):
+    def train_on_batch(self, x, mask, txt, txt_mask):
         x_slow, x_mid, x_prev, target, target_mask = self._prep_batch(x, mask)
 
         return self.model().train_on_batch(
-            [x_slow, x_mid, x_prev], target, sample_weight=target_mask)
+            [x_slow, x_mid, x_prev, txt, txt_mask], target, sample_weight=target_mask)
 
-    def predict_on_batch(self, x, mask=None):
+    def predict_on_batch(self, x, mask, txt, txt_mask):
         x_slow, x_mid, x_prev, target, target_mask = self._prep_batch(x, mask)
-        return self.model().predict_on_batch([x_slow, x_mid, x_prev])
+        return self.model().predict_on_batch([x_slow, x_mid, x_prev, txt, txt_mask])
 
-    def test_on_batch(self, x, mask=None):
+    def test_on_batch(self, x, mask, txt, txt_mask):
         x_slow, x_mid, x_prev, target, target_mask = self._prep_batch(x, mask)
         return self.model().test_on_batch(
-            [x_slow, x_mid, x_prev], target, sample_weight=target_mask)
+            [x_slow, x_mid, x_prev, txt, txt_mask], target, sample_weight=target_mask)
 
     def model(self):
         return self.srnn
@@ -463,18 +486,22 @@ class SRNN(object):
         out = e_X / e_X.sum(axis=dim - 1, keepdims=True)
         return out
 
-    def sample(self, ts, random_state, debug):
+    def sample(self, ts, random_state, debug, txt):
         samples = np.zeros((1, ts, 1), dtype='int32')
         Q_ZERO = self.q_levels // 2
         samples[:, :self.slow_fs] = Q_ZERO
         big_frame_level_outputs = None
         frame_level_outputs = None
         self.set_h0_selector(False)
+        txt_coded = filter_tokenize_ind(txt.lower(), get_code2char_char2code_maps(get_vocabulary())[1])
+        txt_coded = np.expand_dims(txt_coded, axis=0)
+        txt_mask = np.ones((1, txt_coded.shape[1]))
+
 
         for t in xrange(self.slow_fs, ts):
             if t % self.slow_fs == 0:
                 big_frame_level_outputs = self.slow_tier_model_predictor. \
-                    predict_on_batch([samples[:, t-self.slow_fs:t,:]])
+                    predict_on_batch([samples[:, t-self.slow_fs:t,:], txt_coded, txt_mask])
 
             if t % self.mid_fs == 0:
                 frame_level_outputs = self.mid_tier_model_predictor. \
