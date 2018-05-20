@@ -9,6 +9,7 @@ from keras.models import Model
 from keras import backend as K
 from kdllib import get_vocabulary, get_code2char_char2code_maps
 from kdllib import filter_tokenize_ind
+from wnorm import DenseWithWeightNorm, GRUCellWithWeightNorm, GruWithWeightNorm
 import gravesatt
 
 from sframe import SFrame
@@ -26,92 +27,6 @@ BATCH_SIZE = N_TRAIN
 ABET_SIZE = 31
 
 
-def l2norm(x, axis=0):
-    square_sum = K.sum(K.square(x), axis=axis, keepdims=True)
-    norm = K.sqrt(K.maximum(square_sum, K.constant(1e-7)))
-    return norm
-
-
-def weight_norm_regularizer(layer, weight):
-    """Splits weight direction and norm to optimize them separately
-    # Arguments
-        l: Layer to apply w norm
-        w: Float; Initial weights
-    """
-    w_norm = K.cast_to_floatx(np.linalg.norm(K.get_value(weight), axis=0))
-    g = layer.add_weight(
-        name="{}_{}_g".format(layer.name,
-                         weight.name.split(':')[-1]),
-        shape=w_norm.shape,
-        initializer=keras.initializers.Constant(w_norm))
-    normed_weight = weight * (g / l2norm(weight))
-    return normed_weight
-
-class GRUCellWithWeightNorm(GRUCell):
-    def __init__(self, *args, **kwargs):
-
-        self.weight_norm = kwargs.pop('weight_norm', True)
-        super(GRUCellWithWeightNorm, self).__init__(*args, **kwargs)
-
-
-    def add_weight(self, *args, **kwargs):
-        name = kwargs['name']
-        print("parameters name", name)
-        w = super(GRUCellWithWeightNorm, self).add_weight(*args, **kwargs)
-        if self.weight_norm == False:
-            return w
-        if name == "kernel" or name == "recurrent_kernel":
-            print("do weight norm", name)
-            return weight_norm_regularizer(self, w)
-        return w
-
-
-class GruWithWeightNorm(GRU):
-    def __init__(self,
-                 *args,
-                 **kwargs):
-        self.state_selector = kwargs.pop('state_selector', None)
-        self.weight_norm = kwargs.pop('weight_norm', True)
-        super(GruWithWeightNorm, self).__init__(*args,
-                                  **kwargs)
-        kwargs.pop('stateful')
-        kwargs.pop('return_sequences')
-        kwargs['weight_norm'] = self.weight_norm
-        self.cell = GRUCellWithWeightNorm(*args,
-                       **kwargs)
-
-    def call(self, inputs, mask=None, training=None, initial_state=None):
-        initial_state = [
-            K.switch(self.state_selector, init, state)
-            for state, init in zip(self.states, initial_state)
-        ]
-        return super(GruWithWeightNorm, self).call(inputs,
-                                     mask=mask,
-                                     training=training,
-                                     initial_state=initial_state)
-
-
-
-
-
-class DenseWithWeightNorm(Dense):
-    def __init__(self, dim, **kw):
-        kernel_initializer = 'he_uniform'
-        if 'kernel_initializer' in kw:
-            kernel_initializer = kw.get('kernel_initializer')
-            kw.pop('kernel_initializer')
-        if 'weight_norm' in kw:
-            self.weight_norm = kw.pop('weight_norm')
-        else:
-            self.weight_norm = True
-
-        super(DenseWithWeightNorm, self).__init__(
-            dim, kernel_initializer=kernel_initializer, **kw)
-
-    def build(self, input_shape):
-        super(DenseWithWeightNorm, self).build(input_shape)
-        if self.weight_norm:
-            self.kernel = weight_norm_regularizer(self, self.kernel)
 
 
 def scale_samples_for_rnn(frames, q_levels):
@@ -181,16 +96,17 @@ class SRNN(object):
 
 
 
-        slow_output, _, _ = self.slow_rnn(
+        slow_output, slow_rnn_state, k_offset_slow = self.slow_rnn(
             self.slow_tier_model,
             constants=[self.slow_tier_model_input_txt,
                        self.slow_tier_model_input_txt_mask]
         )
+        print('shape of offset', K.int_shape(k_offset_slow))
         c_w = TimeDistributed(self.slow_rnn_cell.get_char_pval())(slow_output)
 
         self.slow_tier_model = TimeDistributed(self.slow_rnn_cell.get_gru_output())(slow_output)
         print("char win shape", K.int_shape(c_w))
-
+        phi_slow = TimeDistributed(self.slow_rnn_cell.get_char_pval())(slow_output)
         c_w_proj_slow = TimeDistributed(
             DenseWithWeightNorm(slow_dim,
                                 weight_norm=self.weight_norm),
@@ -309,7 +225,7 @@ class SRNN(object):
             inputs=[self.slow_tier_model_input,
                     self.slow_tier_model_input_txt,
                     self.slow_tier_model_input_txt_mask],
-            outputs=self.slow_tier_model)
+            outputs=[self.slow_tier_model, slow_rnn_state, phi_slow])
 
         ################################################################################
         ################## Mid tier predictor
@@ -486,12 +402,33 @@ class SRNN(object):
         out = e_X / e_X.sum(axis=dim - 1, keepdims=True)
         return out
 
+    def window_plots(self, phis, windows):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
+
+        plt.figure(figsize=(16, 4))
+        plt.subplot(121)
+        plt.title('Phis', fontsize=20)
+        plt.xlabel("ascii #", fontsize=15)
+        plt.ylabel("time steps", fontsize=15)
+        plt.imshow(phis, interpolation='nearest', aspect='auto', cmap=cm.jet)
+        plt.subplot(122)
+        plt.title('Soft attention window', fontsize=20)
+        plt.xlabel("one-hot vector", fontsize=15)
+        plt.ylabel("time steps", fontsize=15)
+        plt.imshow(windows, interpolation='nearest', aspect='auto', cmap=cm.jet)
+        plt.savefig('maps.png')
+
     def sample(self, ts, random_state, debug, txt):
         samples = np.zeros((1, ts, 1), dtype='int32')
         Q_ZERO = self.q_levels // 2
         samples[:, :self.slow_fs] = Q_ZERO
         big_frame_level_outputs = None
         frame_level_outputs = None
+        big_frame_pos_in_sentence = np.zeros((1, self.slow_rnn_cell.abet_size))
+        big_frame_char_pvals = np.zeros((1, 1))
         self.set_h0_selector(False)
         txt_coded = filter_tokenize_ind(txt.lower(), get_code2char_char2code_maps(get_vocabulary())[1])
         txt_coded = np.expand_dims(txt_coded, axis=0)
@@ -500,8 +437,13 @@ class SRNN(object):
 
         for t in xrange(self.slow_fs, ts):
             if t % self.slow_fs == 0:
-                big_frame_level_outputs = self.slow_tier_model_predictor. \
+                big_frame_level_outputs, rnn_hid, k_offs = self.slow_tier_model_predictor. \
                     predict_on_batch([samples[:, t-self.slow_fs:t,:], txt_coded, txt_mask])
+                big_frame_pos_in_sentence = np.vstack((big_frame_pos_in_sentence, k_offs))
+                char_pvals = rnn_hid[0, self.slow_dim:]
+                char_pvals = char_pvals.reshape((1, -1))
+                big_frame_char_pvals = np.vstack((big_frame_char_pvals, char_pvals))
+                print('max:', np.max(char_pvals), np.max(big_frame_pos_in_sentence))
 
             if t % self.mid_fs == 0:
                 frame_level_outputs = self.mid_tier_model_predictor. \
@@ -514,4 +456,9 @@ class SRNN(object):
             sample_prob = self.numpy_softmax(sample_prob)
             samples[:, t] = self.numpy_sample_softmax(
                 sample_prob, random_state, debug=debug > 0)
+        pos_seq = big_frame_pos_in_sentence.reshape((-1, self.slow_rnn_cell.abet_size))
+        char_pvals = big_frame_char_pvals.reshape((-1, self.slow_rnn_cell.abet_size))
+        print ('k', np.average(pos_seq, axis=-1))
+        self.window_plots(pos_seq, char_pvals)
+
         return samples[0].astype('float32')

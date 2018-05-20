@@ -4,10 +4,10 @@ from keras.layers import GRUCell, Dense, RNN, TimeDistributed
 from keras.layers import Lambda, InputSpec
 from keras.utils import to_categorical
 import numpy as np
+from wnorm import GRUCellWithWeightNorm
 
 
-
-class GravesAttentionCell(GRUCell):
+class GravesAttentionCell(GRUCellWithWeightNorm):
     COEF = 0.3989422917366028  # numpy.sqrt(1/(2*numpy.pi))
 
     def __init__(self,
@@ -35,18 +35,29 @@ class GravesAttentionCell(GRUCell):
         super(GravesAttentionCell, self).build(input_shape)
         # changed kernel dim form abet x untis to abet x input size
         # as attention mask is overlayed onto input to the gru
+        graves_initializer = keras.initializers.RandomNormal(stddev=0.075)
+        window_b_initializer = keras.initializers.RandomNormal(mean=-3.0, stddev=.25)
         self.attn_tm1_kernel = self.add_weight(shape=(self.abet_size, input_shape[-1]),
-                                               initializer='uniform',
+                                               initializer=graves_initializer,
                                                name="attention_tm1_kernel")
         self.alpha_kernel = self.add_weight(shape=(self.units, self.nof_mixtures),
                                             name="alpha_kernel",
-                                            initializer='uniform')
+                                            initializer=graves_initializer)
         self.beta_kernel = self.add_weight(shape=(self.units, self.nof_mixtures),
                                            name="beta_kernel",
-                                           initializer = 'uniform')
+                                           initializer = graves_initializer)
         self.kappa_kernel = self.add_weight(shape=(self.units, self.nof_mixtures),
                                             name="kappa_kernel",
-                                            initializer='uniform')
+                                            initializer=graves_initializer)
+        self.bias_a = self.add_weight(shape=(self.nof_mixtures,),
+                                            name="window_bias_a",
+                                            initializer=window_b_initializer)
+        self.bias_b = self.add_weight(shape=(self.nof_mixtures,),
+                                            name="window_bias_b",
+                                            initializer=window_b_initializer)
+        self.bias_k = self.add_weight(shape=(self.nof_mixtures,),
+                                            name="window_bias_k",
+                                            initializer=window_b_initializer)
 
         self.index_range = K.constant(np.tile(np.arange(500).reshape(1,500,1), (200, 1, self.nof_mixtures)))
         # mu        bs x K
@@ -62,7 +73,6 @@ class GravesAttentionCell(GRUCell):
         return K.tile(K.expand_dims(t, axis=1), (1, count, 1))
 
     def call(self, inputs, states, constants):
-        import tensorflow as tf
 
         [h, k_tm1] = states
         [txt, txt_mask] = constants
@@ -82,6 +92,9 @@ class GravesAttentionCell(GRUCell):
         a = K.dot(output, self.alpha_kernel)
         b = K.dot(output, self.beta_kernel)
         k = K.dot(output, self.kappa_kernel)
+        a = K.bias_add(a, self.bias_a)
+        b = K.bias_add(b, self.bias_b)
+        k = K.bias_add(k, self.bias_k)
 
         a_t = K.softmax(a) + K.epsilon()
         b_t = K.exp(b) + K.epsilon()
@@ -99,6 +112,7 @@ class GravesAttentionCell(GRUCell):
         # phi_t bs x L
         print("phi11", K.int_shape(phi_t), K.int_shape(txt_mask))
         phi_t = phi_t * txt_mask
+        phi_t_output = phi_t
         phi_t = K.tile(K.expand_dims(phi_t, axis=-1), (1, 1, self.abet_size))
         # phi_t bs x L x ABET_SIZE
         # char_seq  bs x L x ABET_SIZE

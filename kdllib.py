@@ -7,6 +7,7 @@ import os
 import glob
 import sys
 import random
+import librosa
 
 try:
     from StringIO import StringIO
@@ -152,8 +153,8 @@ class BlizzardThread(threading.Thread):
             text_group = [
                 filter_tokenize_ind(t.lower(), self.char2code) for t in texts
             ]
-            wav_group = [wavfile.read(wp) for wp in wav_paths]
-            wav_group_samples = [w.astype('float64') for fs, w in wav_group]
+            wav_group = [librosa.load(wp, sr=16000) for wp in wav_paths]
+            wav_group_samples = [librosa.effects.trim(w)[0].astype('float64') for w, _ in wav_group]
 
             wav_group_samples = [(w - np.min(w)) / (np.max(w) - np.min(w))
                                  for w in wav_group_samples]
