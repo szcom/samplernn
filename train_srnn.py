@@ -2,6 +2,10 @@ from __future__ import print_function
 from __future__ import absolute_import
 from __future__ import print_function
 import matplotlib
+from keras.callbacks import TensorBoard
+
+from tbcb import TensorBoardCallback
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -204,66 +208,122 @@ except:
 history_train_loss = []
 history_valid_loss = []
 total_iterations = 0
-for epoch in range(n_epochs):
-    t1 = time.time()
 
-    epoch_train_loss = []
-    epoch_valid_loss = []
-    try:
-        progbar = keras.utils.generic_utils.Progbar(train_stop_index)
-        train_itr = iter(
-            TBPTTIter(
-                bliz_train, cut_len=cut_len, overlap=SLOW_FS))
-        while True:
-            total_iterations += 1
-            x_part, x_mask_part, c_mb, c_mb_mask, reset = next(train_itr)
+
+def srnn_generator(tbptt, loop=False):
+    i = iter(tbptt)
+    while True:
+        try:
+            x_part, x_mask_part, c_mb, c_mb_mask, reset = next(i)
             srnn.set_h0_selector(reset)
-            l = srnn.train_on_batch(x_part, x_mask_part, c_mb, c_mb_mask)
-            if reset:
-                progbar.add(x_part.shape[0], values=[("train loss", l)])
-            epoch_train_loss.append(l)
+            x_slow, x_mid, x_prev, target, target_mask = srnn.prep_batch(x_part, x_mask_part)
+            yield ({'slow_x': x_slow,
+                    'slow_c': c_mb,
+                    'slow_c_mask': c_mb_mask,
+                    'mid_x': x_mid,
+                    'top_x': x_prev
+                    },
+                   target, target_mask)
+        except StopIteration:
+            if not loop:
+                return
+            i = iter(tbptt)
 
-    except KeyboardInterrupt:
-        bliz_train.reset()
-        exit(-1)
-    except StopIteration:
-        pass
 
-    print("Epoch %s training loss in bits(%s) iters (%s)" %
-          (epoch, np.mean(epoch_train_loss), total_iterations))
-    history_train_loss.append(np.mean(epoch_train_loss))
+def fit_generator_train(loop=False):
+    return srnn_generator(TBPTTIter(bliz_train, cut_len=cut_len, overlap=SLOW_FS),
+                          loop=loop)
 
-    if np.any(np.isnan(history_train_loss)):
-        exit(-1)
-    try:
-        valid_itr = iter(
-            TBPTTIter(
-                bliz_valid, cut_len=cut_len, overlap=SLOW_FS))
-        while True:
-            x_part, x_mask_part, c_mb, c_mb_mask, reset = next(valid_itr)
-            srnn.set_h0_selector(reset)
-            l = srnn.test_on_batch(x_part, x_mask_part, c_mb, c_mb_mask)
-            epoch_valid_loss.append(l)
-            # print("Validation cost:", l * np.log2(np.e), "This lh0.mean()", K.get_value(srnn.slow_lstm_h).mean())
+def fit_generator_valid(loop=False):
+    return srnn_generator(TBPTTIter(bliz_valid, cut_len=cut_len, overlap=SLOW_FS),
+                        loop=loop)
 
-    except KeyboardInterrupt:
-        bliz_valid.reset()
-        exit(-1)
-    except StopIteration:
-        pass
-    print("Epoch %s valid loss in bits(%s)" % (epoch,
-                                               np.mean(epoch_valid_loss)))
-    history_valid_loss.append(np.mean(epoch_valid_loss))
-    t2 = time.time()
-    print("Epoch took %s seconds" % (t2 - t1))
-    if args.svepoch > 0 and (epoch % args.svepoch) == 0:
-        srnn.save_weights('{}_srnn_sz{}_e{}_{}.h5'.format(
-            args.exp, DIM, epoch, K.backend()))
+print ('Calculating steps per epoch in batches...')
+steps_per_epoch = sum(1 for i in fit_generator_train())
+steps_per_epoch_valid = sum(1 for i in TBPTTIter(bliz_valid, cut_len=cut_len, overlap=SLOW_FS))
+print ('Done calculating steps per epoch in batches', steps_per_epoch, steps_per_epoch_valid)
 
-plt.figure()
 
-plt.plot(range(len(history_train_loss)), history_train_loss)
-plt.plot(range(len(history_valid_loss)), history_valid_loss)
-plt.savefig('costs.png')
+
+tb_cbk = TensorBoardCallback(histogram_freq=1,
+                             batch_size=minibatch_size,
+                             write_grads=True)
+tb_cbk.batch_size = minibatch_size
+tb_cbk.workers = 0
+tb_cbk.validation_data = fit_generator_valid(loop=True)
+tb_cbk.validation_steps = steps_per_epoch_valid
+USE_KERAS_LOOP = True
+if USE_KERAS_LOOP:
+    srnn.model().fit_generator(generator=fit_generator_train(loop=True),
+                               steps_per_epoch=min(10000, steps_per_epoch),
+                               epochs=2,
+                               verbose=1,
+                               validation_data=fit_generator_valid(loop=True),
+                               shuffle=False,
+                               validation_steps=steps_per_epoch_valid,
+                               callbacks=[tb_cbk],
+                               workers=0)
+else :
+    for epoch in range(n_epochs):
+        t1 = time.time()
+
+        epoch_train_loss = []
+        epoch_valid_loss = []
+        try:
+            progbar = keras.utils.generic_utils.Progbar(train_stop_index)
+            train_itr = iter(
+                TBPTTIter(
+                    bliz_train, cut_len=cut_len, overlap=SLOW_FS))
+            while True:
+                total_iterations += 1
+                x_part, x_mask_part, c_mb, c_mb_mask, reset = next(train_itr)
+                srnn.set_h0_selector(reset)
+                l = srnn.train_on_batch(x_part, x_mask_part, c_mb, c_mb_mask)
+                if reset:
+                    progbar.add(x_part.shape[0], values=[("train loss", l)])
+                epoch_train_loss.append(l)
+
+        except KeyboardInterrupt:
+            bliz_train.reset()
+            exit(-1)
+        except StopIteration:
+            pass
+
+        print("Epoch %s training loss in bits(%s) iters (%s)" %
+              (epoch, np.mean(epoch_train_loss), total_iterations))
+        history_train_loss.append(np.mean(epoch_train_loss))
+
+        if np.any(np.isnan(history_train_loss)):
+            exit(-1)
+        try:
+            valid_itr = iter(
+                TBPTTIter(
+                    bliz_valid, cut_len=cut_len, overlap=SLOW_FS))
+            while True:
+                x_part, x_mask_part, c_mb, c_mb_mask, reset = next(valid_itr)
+                srnn.set_h0_selector(reset)
+                l = srnn.test_on_batch(x_part, x_mask_part, c_mb, c_mb_mask)
+                epoch_valid_loss.append(l)
+                # print("Validation cost:", l * np.log2(np.e), "This lh0.mean()", K.get_value(srnn.slow_lstm_h).mean())
+
+        except KeyboardInterrupt:
+            bliz_valid.reset()
+            exit(-1)
+        except StopIteration:
+            pass
+        print("Epoch %s valid loss in bits(%s)" % (epoch,
+                                                   np.mean(epoch_valid_loss)))
+        history_valid_loss.append(np.mean(epoch_valid_loss))
+        t2 = time.time()
+        print("Epoch took %s seconds" % (t2 - t1))
+        if args.svepoch > 0 and (epoch % args.svepoch) == 0:
+            srnn.save_weights('{}_srnn_sz{}_e{}_{}.h5'.format(
+                args.exp, DIM, epoch, K.backend()))
+
+    plt.figure()
+
+    plt.plot(range(len(history_train_loss)), history_train_loss)
+    plt.plot(range(len(history_valid_loss)), history_valid_loss)
+    plt.savefig('costs.png')
 
 srnn.save_weights('{}_srnn_sz{}_e{}.h5'.format(args.exp, DIM, epoch))

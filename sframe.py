@@ -33,7 +33,7 @@ class SFrame(object):
                                  frame_size=2,
                                  q_levels=0,
                                  embed_size=0):
-        self.model_input = Input(batch_shape=batch_shape)
+        self.model_input = Input(batch_shape=batch_shape, name='top_x')
         self.model = Reshape(
             (1, np.prod(batch_shape[1:])), name='sh_1d')(self.model_input)
         self.model = Lambda(
@@ -56,7 +56,7 @@ class SFrame(object):
                            q_levels=256,
                            embed_size=64):
         # batch_shape: batch_size, prev_sample_seq_len==seq_len+1, 1
-        self.model_input = Input(batch_shape=batch_shape)
+        self.model_input = Input(batch_shape=batch_shape, name='top_x')
 
         self.embedding = Embedding(
             q_levels,

@@ -63,10 +63,12 @@ class SRNN(object):
         ################## Model to train
         ################################################################################
 
-        self.slow_tier_model_input = Input(
+        self.slow_tier_model_input = Input(name='slow_x',
             batch_shape=(batch_size, slow_seq_len * slow_fs, 1))
-        self.slow_tier_model_input_txt = keras.Input(batch_shape=(batch_size, None, ABET_SIZE))
-        self.slow_tier_model_input_txt_mask = keras.Input(batch_shape=(batch_size, None))
+        self.slow_tier_model_input_txt = keras.Input(name='slow_c',
+                                                     batch_shape=(batch_size, None, ABET_SIZE))
+        self.slow_tier_model_input_txt_mask = keras.Input(name='slow_c_mask',
+                                                          batch_shape=(batch_size, None))
 
         self.slow_tier_model = Lambda(
             lambda x: scale_samples_for_rnn(x, q_levels=q_levels),
@@ -77,9 +79,6 @@ class SRNN(object):
 
         self.slow_rnn_h = K.variable(
             np.zeros((1, self.slow_dim)), dtype=K.floatx(), name='show_h0')
-        self.mid_rnn_h = K.variable(
-            np.zeros((1, self.dim)), dtype=K.floatx(), name='mid_h0')
-        self.mid_rnn_h0 = K.tile(self.mid_rnn_h, (batch_size, 1))
 
         self.state_selector = K.zeros(
             (), dtype=K.floatx(), name='slow_state_mask')
@@ -122,7 +121,7 @@ class SRNN(object):
         self.slow_tier_model = Reshape(
             (mid_seq_len, dim), name='slow_reshape4mid')(self.slow_tier_model)
 
-        self.mid_tier_model_input = Input(
+        self.mid_tier_model_input = Input(name='mid_x',
             batch_shape=(batch_size, mid_seq_len * mid_fs, 1))
         self.mid_tier_model = Lambda(
             lambda x: scale_samples_for_rnn(x, q_levels=q_levels),
@@ -143,6 +142,10 @@ class SRNN(object):
             recurrent_activation='sigmoid',
             stateful=self.stateful,
             state_selector=self.state_selector)
+
+        self.mid_rnn_h = K.variable(
+            np.zeros((1, self.dim)), dtype=K.floatx(), name='mid_h0')
+        self.mid_rnn_h0 = K.tile(self.mid_rnn_h, (batch_size, 1))
 
         self.mid_rnn.cell._trainable_weights.append(self.mid_rnn_h)
         self.mid_tier_model = self.mid_rnn(
@@ -225,7 +228,7 @@ class SRNN(object):
             inputs=[self.slow_tier_model_input,
                     self.slow_tier_model_input_txt,
                     self.slow_tier_model_input_txt_mask],
-            outputs=[self.slow_tier_model, slow_rnn_state, phi_slow])
+            outputs=[self.slow_tier_model, slow_rnn_state, phi_slow, k_offset_slow])
 
         ################################################################################
         ################## Mid tier predictor
@@ -341,7 +344,7 @@ class SRNN(object):
         labels_one_hot = labels_one_hot.reshape(labels_shape + (n_classes, ))
         return labels_one_hot.astype(labels_dtype)
 
-    def _prep_batch(self, x, mask):
+    def prep_batch(self, x, mask):
         x_slow = x[:, :-self.slow_fs]
         x_mid = x[:, self.slow_fs - self.mid_fs:-self.mid_fs]
         x_prev = x[:, self.slow_fs - self.mid_fs:-1]
@@ -353,17 +356,17 @@ class SRNN(object):
         return x_slow, x_mid, x_prev, target, target_mask
 
     def train_on_batch(self, x, mask, txt, txt_mask):
-        x_slow, x_mid, x_prev, target, target_mask = self._prep_batch(x, mask)
+        x_slow, x_mid, x_prev, target, target_mask = self.prep_batch(x, mask)
 
         return self.model().train_on_batch(
             [x_slow, x_mid, x_prev, txt, txt_mask], target, sample_weight=target_mask)
 
     def predict_on_batch(self, x, mask, txt, txt_mask):
-        x_slow, x_mid, x_prev, target, target_mask = self._prep_batch(x, mask)
+        x_slow, x_mid, x_prev, target, target_mask = self.prep_batch(x, mask)
         return self.model().predict_on_batch([x_slow, x_mid, x_prev, txt, txt_mask])
 
     def test_on_batch(self, x, mask, txt, txt_mask):
-        x_slow, x_mid, x_prev, target, target_mask = self._prep_batch(x, mask)
+        x_slow, x_mid, x_prev, target, target_mask = self.prep_batch(x, mask)
         return self.model().test_on_batch(
             [x_slow, x_mid, x_prev, txt, txt_mask], target, sample_weight=target_mask)
 
@@ -427,8 +430,8 @@ class SRNN(object):
         samples[:, :self.slow_fs] = Q_ZERO
         big_frame_level_outputs = None
         frame_level_outputs = None
-        big_frame_pos_in_sentence = np.zeros((1, self.slow_rnn_cell.abet_size))
-        big_frame_char_pvals = np.zeros((1, 1))
+        big_frame_pos_in_sentence = np.zeros((1, self.slow_rnn_cell.nof_mixtures))
+        big_frame_char_pvals = np.zeros((1, self.slow_rnn_cell.abet_size))
         self.set_h0_selector(False)
         txt_coded = filter_tokenize_ind(txt.lower(), get_code2char_char2code_maps(get_vocabulary())[1])
         txt_coded = np.expand_dims(txt_coded, axis=0)
@@ -437,10 +440,10 @@ class SRNN(object):
 
         for t in xrange(self.slow_fs, ts):
             if t % self.slow_fs == 0:
-                big_frame_level_outputs, rnn_hid, k_offs = self.slow_tier_model_predictor. \
+                big_frame_level_outputs, rnn_hid, char_pvals, k_offs = self.slow_tier_model_predictor. \
                     predict_on_batch([samples[:, t-self.slow_fs:t,:], txt_coded, txt_mask])
                 big_frame_pos_in_sentence = np.vstack((big_frame_pos_in_sentence, k_offs))
-                char_pvals = rnn_hid[0, self.slow_dim:]
+                #char_pvals = rnn_hid[0, self.slow_dim:]
                 char_pvals = char_pvals.reshape((1, -1))
                 big_frame_char_pvals = np.vstack((big_frame_char_pvals, char_pvals))
                 print('max:', np.max(char_pvals), np.max(big_frame_pos_in_sentence))
@@ -456,7 +459,7 @@ class SRNN(object):
             sample_prob = self.numpy_softmax(sample_prob)
             samples[:, t] = self.numpy_sample_softmax(
                 sample_prob, random_state, debug=debug > 0)
-        pos_seq = big_frame_pos_in_sentence.reshape((-1, self.slow_rnn_cell.abet_size))
+        pos_seq = big_frame_pos_in_sentence.reshape((-1, self.slow_rnn_cell.nof_mixtures))
         char_pvals = big_frame_char_pvals.reshape((-1, self.slow_rnn_cell.abet_size))
         print ('k', np.average(pos_seq, axis=-1))
         self.window_plots(pos_seq, char_pvals)
