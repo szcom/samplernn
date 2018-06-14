@@ -263,6 +263,12 @@ if USE_KERAS_LOOP:
                                validation_steps=steps_per_epoch_valid,
                                callbacks=[tb_cbk],
                                workers=0)
+    print('stopping data generators')
+    bliz_train.reset()
+    bliz_valid.reset()
+    print('done')
+    srnn.save_weights('{}_srnn_sz{}_e{}.h5'.format(args.exp, DIM, 2))
+
 else :
     for epoch in range(n_epochs):
         t1 = time.time()
@@ -326,4 +332,4 @@ else :
     plt.plot(range(len(history_valid_loss)), history_valid_loss)
     plt.savefig('costs.png')
 
-srnn.save_weights('{}_srnn_sz{}_e{}.h5'.format(args.exp, DIM, epoch))
+    srnn.save_weights('{}_srnn_sz{}_e{}.h5'.format(args.exp, DIM, epoch))
