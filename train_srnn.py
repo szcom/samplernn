@@ -159,7 +159,7 @@ if args.sample:
         print('failed to plot models to png')
         pass
 
-    w = pred_srnn.sample(4 * args.samplerate, random_state, args.debug, 'apple')
+    w = pred_srnn.sample(1 * args.samplerate, random_state, args.debug, 'cow')
     fs = args.samplerate
     wavfile.write("generated.wav", fs, soundsc(w))
     exit(0)
@@ -247,20 +247,20 @@ print ('Done calculating steps per epoch in batches', steps_per_epoch, steps_per
 
 tb_cbk = TensorBoardCallback(histogram_freq=1,
                              batch_size=minibatch_size,
-                             write_grads=True)
+                             write_grads=False)
 tb_cbk.batch_size = minibatch_size
 tb_cbk.workers = 0
 tb_cbk.validation_data = fit_generator_valid(loop=True)
-tb_cbk.validation_steps = steps_per_epoch_valid
+tb_cbk.validation_steps = 1
 USE_KERAS_LOOP = True
 if USE_KERAS_LOOP:
     srnn.model().fit_generator(generator=fit_generator_train(loop=True),
-                               steps_per_epoch=min(10000, steps_per_epoch),
-                               epochs=2,
+                               steps_per_epoch=min(5000, steps_per_epoch),
+                               epochs=n_epochs,
                                verbose=1,
                                validation_data=fit_generator_valid(loop=True),
                                shuffle=False,
-                               validation_steps=steps_per_epoch_valid,
+                               validation_steps=min(500, steps_per_epoch_valid),
                                callbacks=[tb_cbk],
                                workers=0)
     print('stopping data generators')

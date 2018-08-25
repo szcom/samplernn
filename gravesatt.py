@@ -37,23 +37,25 @@ class GravesAttentionCell(GRUCellWithWeightNorm):
         # as attention mask is overlayed onto input to the gru
         graves_initializer = keras.initializers.RandomNormal(stddev=0.075)
         window_b_initializer = keras.initializers.RandomNormal(mean=-3.0, stddev=.25)
+        regularizer = keras.regularizers.l2(0.01)
         self.attn_tm1_kernel = self.add_weight(shape=(self.abet_size, input_shape[-1]),
                                                initializer=graves_initializer,
+                                               regularizer=regularizer,
                                                name="attention_tm1_kernel")
         self.alpha_kernel = self.add_weight(shape=(self.units, self.nof_mixtures),
                                             name="alpha_kernel",
+                                            regularizer=regularizer,
                                             initializer=graves_initializer)
         self.beta_kernel = self.add_weight(shape=(self.units, self.nof_mixtures),
                                            name="beta_kernel",
+                                           regularizer=regularizer,
                                            initializer = graves_initializer)
         self.kappa_kernel = self.add_weight(shape=(self.units, self.nof_mixtures),
                                             name="kappa_kernel",
+                                            regularizer=regularizer,
                                             initializer=graves_initializer)
         self.bias_a = self.add_weight(shape=(self.nof_mixtures,),
                                             name="window_bias_a",
-                                            initializer=window_b_initializer)
-        self.bias_b = self.add_weight(shape=(self.nof_mixtures,),
-                                            name="window_bias_b",
                                             initializer=window_b_initializer)
         self.bias_k = self.add_weight(shape=(self.nof_mixtures,),
                                             name="window_bias_k",
@@ -73,6 +75,7 @@ class GravesAttentionCell(GRUCellWithWeightNorm):
         return K.tile(K.expand_dims(t, axis=1), (1, count, 1))
 
     def call(self, inputs, states, constants):
+#        import tensorflow as tf
 
         [h, k_tm1] = states
         [txt, txt_mask] = constants
@@ -93,7 +96,6 @@ class GravesAttentionCell(GRUCellWithWeightNorm):
         b = K.dot(output, self.beta_kernel)
         k = K.dot(output, self.kappa_kernel)
         a = K.bias_add(a, self.bias_a)
-        b = K.bias_add(b, self.bias_b)
         k = K.bias_add(k, self.bias_k)
 
         a_t = K.softmax(a) + K.epsilon()
@@ -103,6 +105,7 @@ class GravesAttentionCell(GRUCellWithWeightNorm):
         b_t_unrolled = self.repeater(b_t, char_seq_len)
         k_t_unrolled = self.repeater(k_t, char_seq_len)
         a_t_unrolled = self.repeater(a_t, char_seq_len)
+        #b_t_unrolled = tf.Print(b_t_unrolled, [b_t_unrolled, (k_t_unrolled - index_unrolled) ** 2], summarize=80, message='b_t')
         print("unrolled", K.int_shape(b_t_unrolled), K.int_shape(k_t_unrolled), K.int_shape(index_unrolled))
         #(bs, L, K) (bs, L, K) (bs, L, K)
         phi_t = a_t_unrolled * K.exp(-0.5 * b_t_unrolled * (k_t_unrolled - index_unrolled) ** 2)
