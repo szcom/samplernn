@@ -176,6 +176,8 @@ class SRNN(object):
 
         self.top_tier_model_input_from_mid_tier = Input(
             batch_shape=(batch_size, 1, dim))
+        self.top_tier_model_input_from_char_win = Input(
+            batch_shape=(batch_size, 1, q_levels))
         self.top_tier_model_input_predictor = Input(
             batch_shape=(batch_size, mid_fs, 1))
         self.top_tier_model = layers.add(
@@ -204,6 +206,17 @@ class SRNN(object):
         self.top_tier_model = TimeDistributed(
             self.top_tier_mlp_l3, name='mlp_3')(self.top_tier_model)
 
+        self.c_w_proj_top_dense = DenseWithWeightNorm(q_levels * slow_fs,
+                                weight_norm=self.weight_norm)
+        self.c_w_proj_top = TimeDistributed(self.c_w_proj_top_dense,
+            name='char_win2top')(c_w)
+        self.c_w_proj_top = Reshape(
+            (slow_seq_len * slow_fs, q_levels),
+            name='charwin_reshape4top')(self.c_w_proj_top)
+        self.top_tier_model = layers.add(
+            [self.c_w_proj_top, self.top_tier_model])
+
+
         self.mid_tier_model_input_from_slow_tier = Input(
             batch_shape=(batch_size, 1, dim))
         self.mid_tier_model_input_predictor = Input(
@@ -228,7 +241,7 @@ class SRNN(object):
             inputs=[self.slow_tier_model_input,
                     self.slow_tier_model_input_txt,
                     self.slow_tier_model_input_txt_mask],
-            outputs=[self.slow_tier_model, slow_rnn_state, phi_slow, k_offset_slow])
+            outputs=[self.slow_tier_model, slow_rnn_state, phi_slow, k_offset_slow, self.c_w_proj_top])
 
         ################################################################################
         ################## Mid tier predictor
@@ -291,10 +304,15 @@ class SRNN(object):
             self.top_tier_model_predictor)
         self.top_tier_model_predictor = TimeDistributed(self.top_tier_mlp_l3)(
             self.top_tier_model_predictor)
+        self.top_tier_model_predictor = layers.add([
+            self.top_tier_model_predictor,
+            self.top_tier_model_input_from_char_win
+        ])
 
         self.top_tier_model_predictor = Model([
             self.top_tier_model_input_predictor,
-            self.top_tier_model_input_from_mid_tier
+            self.top_tier_model_input_from_mid_tier,
+            self.top_tier_model_input_from_char_win
         ], self.top_tier_model_predictor)
 
         def categorical_crossentropy(target, output):
@@ -429,6 +447,7 @@ class SRNN(object):
         Q_ZERO = self.q_levels // 2
         samples[:, :self.slow_fs] = Q_ZERO
         big_frame_level_outputs = None
+        char_window_to_q = None
         frame_level_outputs = None
         big_frame_pos_in_sentence = np.zeros((1, self.slow_rnn_cell.nof_mixtures))
         big_frame_char_pvals = np.zeros((1, self.slow_rnn_cell.abet_size))
@@ -440,7 +459,7 @@ class SRNN(object):
 
         for t in xrange(self.slow_fs, ts):
             if t % self.slow_fs == 0:
-                big_frame_level_outputs, rnn_hid, char_pvals, k_offs = self.slow_tier_model_predictor. \
+                big_frame_level_outputs, rnn_hid, char_pvals, k_offs, char_window_to_q = self.slow_tier_model_predictor. \
                     predict_on_batch([samples[:, t-self.slow_fs:t,:], txt_coded, txt_mask])
                 big_frame_pos_in_sentence = np.vstack((big_frame_pos_in_sentence, k_offs))
                 #char_pvals = rnn_hid[0, self.slow_dim:]
@@ -455,7 +474,8 @@ class SRNN(object):
 
             sample_prob = self.top_tier_model_predictor. \
                 predict_on_batch([samples[:, t-self.mid_fs:t],
-                                  frame_level_outputs[:, t % self.mid_fs][:,np.newaxis,:]])
+                                  frame_level_outputs[:, t % self.mid_fs][:,np.newaxis,:],
+                                  char_window_to_q[:, t % self.slow_fs][:, np.newaxis, :]])
             sample_prob = self.numpy_softmax(sample_prob)
             samples[:, t] = self.numpy_sample_softmax(
                 sample_prob, random_state, debug=debug > 0)
