@@ -159,7 +159,7 @@ if args.sample:
         print('failed to plot models to png')
         pass
 
-    w = pred_srnn.sample(1 * args.samplerate, random_state, args.debug, 'cow')
+    w = pred_srnn.sample(1 * args.samplerate, random_state, args.debug, 'apple')
     fs = args.samplerate
     wavfile.write("generated.wav", fs, soundsc(w))
     exit(0)
@@ -252,6 +252,11 @@ tb_cbk.batch_size = minibatch_size
 tb_cbk.workers = 0
 tb_cbk.validation_data = fit_generator_valid(loop=True)
 tb_cbk.validation_steps = 1
+earlystop = keras.callbacks.EarlyStopping(monitor='val_loss', min_delta=0.01, patience=2, \
+                          verbose=1, mode='auto')
+checkpoint = keras.callbacks.ModelCheckpoint("w-{epoch:02d}-{val_loss:.2f}.hdf5", monitor='val_loss', verbose=1, \
+                             save_best_only=True, save_weights_only=True, \
+                             mode='auto', period=1)
 USE_KERAS_LOOP = True
 if USE_KERAS_LOOP:
     srnn.model().fit_generator(generator=fit_generator_train(loop=True),
@@ -261,7 +266,7 @@ if USE_KERAS_LOOP:
                                validation_data=fit_generator_valid(loop=True),
                                shuffle=False,
                                validation_steps=min(500, steps_per_epoch_valid),
-                               callbacks=[tb_cbk],
+                               callbacks=[tb_cbk, earlystop, checkpoint],
                                workers=0)
     print('stopping data generators')
     bliz_train.reset()
