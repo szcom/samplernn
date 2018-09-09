@@ -177,11 +177,20 @@ class SRNN(object):
         self.top_tier_model_input_from_mid_tier = Input(
             batch_shape=(batch_size, 1, dim))
         self.top_tier_model_input_from_char_win = Input(
-            batch_shape=(batch_size, 1, q_levels))
+            batch_shape=(batch_size, 1, dim))
         self.top_tier_model_input_predictor = Input(
             batch_shape=(batch_size, mid_fs, 1))
+
+        self.c_w_proj_top_dense = DenseWithWeightNorm(dim * slow_fs,
+                                weight_norm=self.weight_norm)
+        self.c_w_proj_top = TimeDistributed(self.c_w_proj_top_dense,
+            name='char_win2top')(c_w)
+
+        self.c_w_proj_top = Reshape(
+            (slow_seq_len * slow_fs, dim),
+            name='charwin_reshape4top')(self.c_w_proj_top)
         self.top_tier_model = layers.add(
-            [self.mid_tier_model, self.top_tier_model])
+            [self.mid_tier_model, self.top_tier_model, self.c_w_proj_top])
 
         self.top_tier_mlp_l1 = DenseWithWeightNorm(
             dim,
@@ -206,15 +215,6 @@ class SRNN(object):
         self.top_tier_model = TimeDistributed(
             self.top_tier_mlp_l3, name='mlp_3')(self.top_tier_model)
 
-        self.c_w_proj_top_dense = DenseWithWeightNorm(q_levels * slow_fs,
-                                weight_norm=self.weight_norm)
-        self.c_w_proj_top = TimeDistributed(self.c_w_proj_top_dense,
-            name='char_win2top')(c_w)
-        self.c_w_proj_top = Reshape(
-            (slow_seq_len * slow_fs, q_levels),
-            name='charwin_reshape4top')(self.c_w_proj_top)
-        self.top_tier_model = layers.add(
-            [self.c_w_proj_top, self.top_tier_model])
 
 
         self.mid_tier_model_input_from_slow_tier = Input(
@@ -295,7 +295,8 @@ class SRNN(object):
             self.top_tier_model_predictor)
         self.top_tier_model_predictor = layers.add([
             self.top_tier_model_predictor,
-            self.top_tier_model_input_from_mid_tier
+            self.top_tier_model_input_from_mid_tier,
+            self.top_tier_model_input_from_char_win
         ])
 
         self.top_tier_model_predictor = TimeDistributed(self.top_tier_mlp_l1)(
@@ -304,10 +305,6 @@ class SRNN(object):
             self.top_tier_model_predictor)
         self.top_tier_model_predictor = TimeDistributed(self.top_tier_mlp_l3)(
             self.top_tier_model_predictor)
-        self.top_tier_model_predictor = layers.add([
-            self.top_tier_model_predictor,
-            self.top_tier_model_input_from_char_win
-        ])
 
         self.top_tier_model_predictor = Model([
             self.top_tier_model_input_predictor,
@@ -465,7 +462,7 @@ class SRNN(object):
                 #char_pvals = rnn_hid[0, self.slow_dim:]
                 char_pvals = char_pvals.reshape((1, -1))
                 big_frame_char_pvals = np.vstack((big_frame_char_pvals, char_pvals))
-                print('max:', np.max(char_pvals), np.max(big_frame_pos_in_sentence))
+                print('max:', np.max(char_pvals),  np.argmax(char_pvals), np.max(big_frame_pos_in_sentence))
 
             if t % self.mid_fs == 0:
                 frame_level_outputs = self.mid_tier_model_predictor. \
